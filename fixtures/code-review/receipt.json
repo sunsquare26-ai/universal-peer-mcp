@@ -1,0 +1,15 @@
+{
+  "message_id": "10000000-0000-4000-8000-000000000104",
+  "thread_id": "10000000-0000-4000-8000-000000000103",
+  "reply_to": "10000000-0000-4000-8000-000000000102",
+  "payload": {
+    "review_id": "10000000-0000-4000-8000-000000000101",
+    "verdict": "pass",
+    "review_thread_id": "10000000-0000-4000-8000-000000000105",
+    "rounds": 3,
+    "reviewed_at": "2026-09-03T00:00:00Z",
+    "artifact_hash": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "mandatory_changes": [],
+    "unresolved": []
+  }
+}

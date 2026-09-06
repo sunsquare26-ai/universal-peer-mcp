@@ -11,6 +11,7 @@ import { localPeerPid } from "./adapters/claude-native-v1/darwin-peerpid.mjs";
 import { processStart, processUid } from "./adapters/claude-native-v1/darwin-procargs.mjs";
 import { startReceiver } from "./adapters/claude-native-v1/receiver.mjs";
 import { MilestoneExtension } from "./extensions/milestone/index.mjs";
+import { CodeReviewExtension, publicLedgerEvent } from "./extensions/code-review/index.mjs";
 
 const paths = statePaths(); const admin = process.env.CLAUDE_PEER_MCP_ADMIN === "1";
 const enabledExtensions = parseExtensions(process.env.CLAUDE_PEER_MCP_EXTENSIONS);
@@ -19,12 +20,13 @@ const daemonLock = await fsp.open(paths.daemonLock, fs.constants.O_WRONLY | fs.c
 await daemonLock.writeFile(`${JSON.stringify({ pid: process.pid, procStart: processStart() })}\n`); await daemonLock.sync();
 let targets = {}; try { targets = await loadTargets(paths.targets); } catch (error) { if (error.code !== "ENOENT") throw error; }
 const store = new EventStore(paths); await store.init();
-let core; let milestone = null;
+let core; let milestone = null; let codeReview = null;
 const receiver = Object.keys(targets).length > 0
-  ? await startReceiver(async (frame, peer) => { await core.acceptFrame(frame, peer); if (milestone) await milestone.observeFrame(frame, peer); })
+  ? await startReceiver(async (frame, peer) => { await core.acceptFrame(frame, peer); if (milestone) await milestone.observeFrame(frame, peer); if (codeReview) await codeReview.observeFrame(frame, peer); })
   : { address: "uds:/unpublished/claude-peer-mcp.sock", sessionId: null, close: async () => {} };
 core = new PeerCore({ targets, store, address: receiver.address });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
+if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });
 const token = crypto.randomBytes(32).toString("hex"); let closing = false;
 const controlSockets = new Set();
 const server = net.createServer((socket) => accept(socket));
@@ -55,11 +57,15 @@ async function dispatch(method, args) {
   if (method === "peer_status") return core.status(args.alias);
   if (method === "peer_send") return core.send(publicSendArgs(args));
   if (method === "peer_wait") return core.wait(args);
-  if (method === "peer_list_events") return core.events(args);
+  if (method === "peer_list_events") { const listing = core.events(args); return { ...listing, events: listing.events.map(publicLedgerEvent) }; }
   if (method === "milestone_status" && milestone) return milestone.status(args);
   if (method === "milestone_list" && milestone) return milestone.list(args);
   if (method === "milestone_wait" && milestone) return milestone.wait(args);
   if (method === "milestone_recover_ack" && milestone) return milestone.recover(args);
+  if (method === "code_review_status" && codeReview) return codeReview.status(args);
+  if (method === "code_review_list" && codeReview) return codeReview.list(args);
+  if (method === "code_review_wait" && codeReview) return codeReview.wait(args);
+  if (method === "code_review_request" && codeReview) return codeReview.request(args);
   if (method === "daemon_status") return { running: true, pid: process.pid, procStart: identity.procStart, admin, enabledExtensions, eventSeq: store.events.at(-1)?.seq ?? 0, targetCount: Object.keys(targets).length };
   if (method === "daemon_shutdown" && admin) return { shuttingDown: true };
   throw new Error("unknown or unavailable daemon method");
@@ -81,5 +87,5 @@ function publicSendArgs(args) {
   }
   return args;
 }
-function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); if (names.some((name) => name !== "milestone")) throw new Error("unsupported extension"); return names; }
+function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); if (names.some((name) => !["code-review", "milestone"].includes(name))) throw new Error("unsupported extension"); return names; }
 process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown);

@@ -1,0 +1,14 @@
+{
+  "alias": "reviewer",
+  "reviewId": "10000000-0000-4000-8000-000000000101",
+  "requestMessageId": "10000000-0000-4000-8000-000000000102",
+  "threadId": "10000000-0000-4000-8000-000000000103",
+  "targetKind": "implementation",
+  "artifactHash": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+  "scope": ["src/example/index.mjs", "public tool contract"],
+  "nonGoals": ["documentation wording"],
+  "evidence": [
+    { "command": "bun test test/example.test.mjs", "summary": "12 pass, 0 fail" },
+    { "command": "node --check src/example/index.mjs", "summary": "no syntax errors" }
+  ]
+}

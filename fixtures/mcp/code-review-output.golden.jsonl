@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","structuredContent":{"found":false,"passed":false,"state":"not_found","cursor":0},"content":[{"type":"text","text":"code_review_status 결과"}],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"claude-peer-mcp","version":"0.1.0"}}}}

@@ -41,4 +41,4 @@ process.stdin.on("data", (chunk) => {
 });
 async function handle(line) { let request; try { request = JSON.parse(line); } catch { return write({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }); } const response = await facade.handle(request); if (response !== null) write(response); }
 function write(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
-function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); return names.filter((name) => name === "milestone"); }
+function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); return names.filter((name) => ["code-review", "milestone"].includes(name)); }
