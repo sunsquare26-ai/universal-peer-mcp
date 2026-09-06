@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tgz
+.DS_Store
+targets.json
+events.jsonl
+*.sock
+*.pid
+*.token
+*.lock
+state/
+.claude-peer-mcp/

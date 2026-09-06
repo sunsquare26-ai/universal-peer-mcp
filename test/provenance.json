@@ -1,0 +1,10 @@
+{
+  "method": "clean-room-public-tree",
+  "source": "approved public design only",
+  "privateRuntimeFilesCopied": [],
+  "milestones": {
+    "P0": ["package.json", "LICENSE", ".gitignore", "targets.example.json", "README.md", "docs/architecture.md"],
+    "P1": ["src/core", "src/adapters/claude-native-v1", "src/daemon.mjs"],
+    "P2": ["src/mcp", "src/server.mjs", "src/cli.mjs", "fixtures/mcp"]
+  }
+}
