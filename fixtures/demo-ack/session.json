@@ -1,0 +1,20 @@
+{
+  "alias": "frontend-review",
+  "senderAddress": "uds:/path/to/state/claude-peer-mcp.sock",
+  "permissionMode": "prompting",
+  "threadId": "10000000-0000-4000-8000-000000000020",
+  "subscriptionId": "10000000-0000-4000-8000-000000000022",
+  "request": {
+    "messageId": "10000000-0000-4000-8000-000000000021",
+    "kind": "review_request",
+    "body": "Run the test suite in /path/to/project and report pass or fail."
+  },
+  "ack": {
+    "messageId": "10000000-0000-4000-8000-000000000023"
+  },
+  "reply": {
+    "messageId": "10000000-0000-4000-8000-000000000024",
+    "verdict": "pass",
+    "body": "92 tests, 0 failures."
+  }
+}

@@ -7,6 +7,6 @@ events.jsonl
 *.sock
 *.pid
 *.token
-*.lock
+daemon.lock
 state/
 .claude-peer-mcp/

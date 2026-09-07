@@ -26,6 +26,21 @@ export function processUid(pid = process.pid) {
   return value;
 }
 
+// uid and start time of one pid in a single fork. The receiver reads an identity for every
+// frame, so the cost of that read is on the path of every message: two ps calls per read
+// measured 2.22 ms on this machine and, because execFileSync blocks the loop, that delay is
+// paid by every other connection waiting to be handled. One call halves it. The output is
+// "  501 Mon Sep  7 13:34:59 2026": the uid, then lstart, which itself carries spaces.
+export function processIdentity(pid = process.pid) {
+  assertPid(pid);
+  const raw = execFileSync("ps", ["-p", String(pid), "-o", "uid=,lstart="], { encoding: "utf8" }).trim();
+  const match = /^(\d{1,10})\s+(\S.*)$/.exec(raw);
+  if (!match) throw new Error("process identity unavailable");
+  const uid = Number(match[1]);
+  if (!Number.isInteger(uid)) throw new Error("process uid unavailable");
+  return { uid, procStart: match[2].replace(/\s+/g, " ") };
+}
+
 export function readProcessArgv(pid) {
   assertPid(pid);
   const argmax = readKernelInt([CTL_KERN, KERN_ARGMAX]);

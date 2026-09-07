@@ -3,8 +3,10 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export function statePaths(root = process.env.CLAUDE_PEER_MCP_STATE_DIR ?? path.join(os.homedir(), "Library", "Application Support", "claude-peer-mcp")) {
-  const absolute = path.resolve(root);
+export function statePaths(root = process.env.CLAUDE_PEER_MCP_STATE_DIR) {
+  // An empty value is an unset value, not an override: `??` would resolve "" to the process
+  // working directory and put state, and a 0700 chmod, inside whatever folder the caller is in.
+  const absolute = path.resolve(root || path.join(os.homedir(), "Library", "Application Support", "claude-peer-mcp"));
   return {
     root: absolute,
     events: path.join(absolute, "events.jsonl"),

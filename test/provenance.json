@@ -2,9 +2,95 @@
   "method": "clean-room-public-tree",
   "source": "approved public design only",
   "privateRuntimeFilesCopied": [],
+  "notStarted": [
+    "P5",
+    "P7"
+  ],
   "milestones": {
-    "P0": ["package.json", "LICENSE", ".gitignore", "targets.example.json", "README.md", "docs/architecture.md"],
-    "P1": ["src/core", "src/adapters/claude-native-v1", "src/daemon.mjs"],
-    "P2": ["src/mcp", "src/server.mjs", "src/cli.mjs", "fixtures/mcp"]
-  }
+    "P0": [
+      "package.json",
+      "LICENSE",
+      ".gitignore",
+      "targets.example.json",
+      "README.md",
+      "docs/architecture.md"
+    ],
+    "P1": [
+      "src/core",
+      "src/adapters/claude-native-v1",
+      "src/daemon.mjs"
+    ],
+    "P2": [
+      "src/mcp",
+      "src/server.mjs",
+      "src/cli.mjs",
+      "fixtures/mcp"
+    ],
+    "P3": [
+      "src/extensions/milestone",
+      "test/milestone.test.mjs",
+      "fixtures/mcp/milestone-output.golden.jsonl"
+    ],
+    "P4": [
+      "src/extensions/code-review",
+      "test/code-review.test.mjs",
+      "test/code-review-stdio.test.mjs",
+      "fixtures/code-review",
+      "fixtures/mcp/code-review-output.golden.jsonl"
+    ],
+    "P5": [],
+    "P6": [
+      "package.json",
+      "package-lock.json",
+      ".gitignore",
+      "LICENSE",
+      "src/cli.mjs",
+      "src/doctor.mjs",
+      "src/adapters/claude-native-v1/registry.mjs",
+      "test/pack.test.mjs",
+      "test/install.test.mjs",
+      "test/doctor.test.mjs",
+      "test/demo-ack.test.mjs",
+      "test/provenance.json",
+      "fixtures/demo-ack",
+      "README.md",
+      "SECURITY.md",
+      "TRADEMARKS.md",
+      "CONTRIBUTING.md",
+      "COMPATIBILITY.md",
+      "docs",
+      "examples",
+      "src/core/state-paths.mjs",
+      "test/state-paths.test.mjs",
+      "test/screen.mjs",
+      "test/screenshot.test.mjs",
+      "test/owned-signal.mjs",
+      "test/owned-signal.test.mjs",
+      "test/peer-sender.mjs"
+    ]
+  },
+  "deviations": [],
+  "requirements": [
+    {
+      "milestone": "P6",
+      "requirement": "sanitized screenshot with redaction verification",
+      "status": "met",
+      "artifact": "docs/round-trip.png",
+      "method": "drawn from fixtures/demo-ack/session.json by test/screen.mjs, never captured from a screen, so no menu bar, account name, window title, other session name or home path was ever in the image to crop",
+      "verifiedBy": [
+        "test/screenshot.test.mjs",
+        "test/pack.test.mjs"
+      ],
+      "redactionCheck": [
+        "the shipped bytes must equal the bytes the fixture draws, and the drawing is deterministic: stored deflate blocks, no timestamp, no zlib version dependency",
+        "the pixels are read back to text and the text is scanned by the same detectors as the source in test/pack.test.mjs",
+        "the recovered text is redrawn and every pixel compared, so a mark the text does not account for is refused",
+        "the chunk list must be exactly IHDR, PLTE, IDAT, IEND, so there is no tEXt, iTXt, zTXt, eXIf or tIME to strip",
+        "the sha-256 of the file is pinned in test/pack.test.mjs and every other image is still refused by name and by content"
+      ],
+      "limits": [
+        "the reader matches cells against the font in test/screen.mjs; it is a complete account of a picture this repository drew, not general purpose OCR of an arbitrary image"
+      ]
+    }
+  ]
 }

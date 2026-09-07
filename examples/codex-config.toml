@@ -1,0 +1,25 @@
+# Codex CLI — add this to ~/.codex/config.toml
+#
+# Nothing here is specific to your machine. Do not put a home directory path,
+# a session UUID, or a token in this file. Targets go in targets.json inside
+# the state directory; see ../docs/configuration.md.
+
+[mcp_servers.claude-peer]
+command = "claude-peer-mcp"
+args = ["serve"]
+
+# After a registry release, and without a global install, straight from npm instead
+# (this does not work before the package is published):
+#
+# [mcp_servers.claude-peer]
+# command = "npx"
+# args = ["-y", "claude-peer-mcp", "serve"]
+
+# Optional extensions are off unless named here. They are fixed when the
+# daemon starts, so stop a running daemon before changing this line:
+#
+# args = ["serve", "--enable", "milestone", "--enable", "code-review"]
+
+# Equivalent one-liner:
+#
+#   codex mcp add claude-peer -- claude-peer-mcp serve

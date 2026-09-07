@@ -12,7 +12,13 @@ export function toolDefinitions(aliases, { admin = false, extensions = [], reque
       messageId: uuid, subscriptionId: uuid, responseMessageId: uuid, threadId: uuid, replyTo: { type: ["string", "null"], format: "uuid" },
       alias: { type: "string" }, kind: { type: "string" }, requestHash: { type: "string", pattern: "^[0-9a-f]{64}$" },
       bytesWritten: { type: "integer", minimum: 0 }, errorCode: { type: "string" }, status: { type: "string" }, state: { type: "string" },
-      verdict: nullableString, evidence: nullableString, expected: nullableString, observed: nullableString
+      verdict: nullableString, evidence: nullableString, expected: nullableString, observed: nullableString,
+      // Why a frame was refused or matched nothing, and where it arrived. The connection number
+      // is local to the receiver and the ordinal is local to the connection, so the pair groups
+      // frames without naming anything outside this machine. The reason is a bare lower case
+      // word by contract: a path, a token or an id cannot be written in this field without the
+      // public result failing the check that publishes it.
+      reason: { type: "string", pattern: "^[a-z][a-z0-9_]{2,63}$" }, connectionId: { type: "integer", minimum: 1 }, frameOrdinal: { type: "integer", minimum: 1 }
     },
     additionalProperties: false
   };

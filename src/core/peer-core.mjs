@@ -108,28 +108,35 @@ export class PeerCore extends EventEmitter {
 
   events(args) { return { cursor: this.store.events.at(-1)?.seq ?? 0, events: this.store.list(args) }; }
 
+  // A frame ends in one of three places and the caller is told which: taken (null), arrived and
+  // matched nothing this daemon is waiting for (a reason), or written by a process that is not
+  // the one the message it answers was sent to (a throw). "Matched nothing" never carries a
+  // messageId — there is none. The id such a frame names is an unverified claim about somebody
+  // else's ledger, and recording it would make the claim look checked.
   async acceptFrame(frame, peer) {
     if (frame.type === "control" && frame.action === "peer_message_status" && typeof frame.orig_msg_id === "string") {
-      const request = this.store.requestByTransport(frame.orig_msg_id); if (!request) return;
+      const request = this.store.requestByTransport(frame.orig_msg_id); if (!request) return uncorrelated("unknown_message_status");
       this.#assertPeer(request, peer);
       if (!["held", "delivered", "denied", "expired", "refused", "dropped"].includes(frame.status)) throw new Error("invalid status");
       const terminal = ["denied", "expired", "refused", "dropped"].includes(frame.status);
-      const event = await this.store.append(terminal ? "peer_terminal_failure" : "peer_message_status", { messageId: request.messageId, transportMessageId: frame.orig_msg_id, status: frame.status, evidence: "message_status", peerPid: peer.pid, peerProcStart: peer.procStart, sourceAddress: typeof frame.from === "string" ? frame.from : null }); this.emit("event", event); return;
+      const event = await this.store.append(terminal ? "peer_terminal_failure" : "peer_message_status", { messageId: request.messageId, transportMessageId: frame.orig_msg_id, status: frame.status, evidence: "message_status", peerPid: peer.pid, peerProcStart: peer.procStart, sourceAddress: typeof frame.from === "string" ? frame.from : null }); this.emit("event", event); return null;
     }
     if (frame.type === "control" && frame.action === "peer_idle_notice" && typeof frame.orig_msg_id === "string") {
-      const request = this.store.requestBySubscription(frame.orig_msg_id); if (!request) return;
+      const request = this.store.requestBySubscription(frame.orig_msg_id); if (!request) return uncorrelated("unknown_idle_notice");
       this.#assertPeer(request, peer);
-      const event = await this.store.append("peer_idle_notice", { messageId: request.messageId, subscriptionId: frame.orig_msg_id, state: frame.state, evidence: "idle_notice", peerPid: peer.pid, peerProcStart: peer.procStart }); this.emit("event", event); return;
+      const event = await this.store.append("peer_idle_notice", { messageId: request.messageId, subscriptionId: frame.orig_msg_id, state: frame.state, evidence: "idle_notice", peerPid: peer.pid, peerProcStart: peer.procStart }); this.emit("event", event); return null;
     }
     const content = frame?.message?.content;
-    const marker = parseMarker(content); if (!marker) return;
-    const request = this.store.request(marker.replyTo); if (!request || request.threadId !== marker.threadId) return;
+    const marker = parseMarker(content); if (!marker) return uncorrelated("no_reply_marker");
+    const request = this.store.request(marker.replyTo); if (!request || request.threadId !== marker.threadId) return uncorrelated("unknown_reply_target");
     this.#assertPeer(request, peer);
-    const event = await this.store.append(marker.type === "ack" ? "peer_ack" : "peer_reply", { messageId: marker.replyTo, responseMessageId: marker.messageId, threadId: marker.threadId, verdict: marker.verdict, evidence: "application_ack", peerPid: peer.pid, peerProcStart: peer.procStart }); this.emit("event", event);
+    const event = await this.store.append(marker.type === "ack" ? "peer_ack" : "peer_reply", { messageId: marker.replyTo, responseMessageId: marker.messageId, threadId: marker.threadId, verdict: marker.verdict, evidence: "application_ack", peerPid: peer.pid, peerProcStart: peer.procStart }); this.emit("event", event); return null;
   }
 
+  // The message this frame answers is ours, so its id is a checked fact and travels with the
+  // refusal; that is what puts the refusal in front of a wait on that message.
   #assertPeer(request, peer) {
-    if (!peer || peer.pid !== request.targetPid || peer.procStart !== request.targetProcStart) throw new Error("inbound peer identity mismatch");
+    if (!peer || peer.pid !== request.targetPid || peer.procStart !== request.targetProcStart) throw Object.assign(codedError("INBOUND_IDENTITY_MISMATCH", "inbound peer identity mismatch"), { messageId: request.messageId });
   }
 
   async #resolve(expected) { try { return await this.resolver(expected, this.resolverOptions); } catch { throw codedError("TARGET_UNAVAILABLE", "target is unavailable"); } }
@@ -156,4 +163,32 @@ function durableState(events) {
   if (events.some((event) => event.type === "send_requested")) return "requested";
   return "unknown";
 }
+function uncorrelated(reason) { return { correlated: false, reason }; }
+
+// The daemon's frame handler, exported so that what the daemon runs is what a test can run.
+// core first and then the observers, in that order, and the ledger gets a line for every frame
+// that did not end where it was aimed: a refusal when the writer was the wrong process or a
+// handler rejected the frame, an uncorrelated note when nothing was waiting for it. An observer
+// that took the frame answers truthily and that answer outranks core's "matched nothing", which
+// is how a milestone completion — not a core reply marker — stays off the uncorrelated list.
+// Recording never replaces the failure it is recording: the original error is what propagates,
+// and the connection ends on it exactly as before.
+export function frameObserver({ core, store, observers = [] }) {
+  return async (frame, peer, context = {}) => {
+    let outcome;
+    try {
+      outcome = await core.acceptFrame(frame, peer);
+      for (const observe of observers) if (await observe(frame, peer)) outcome = null;
+    } catch (error) {
+      await store.append("peer_frame_refused", { ...context, reason: refusalReason(error), ...(typeof error?.messageId === "string" ? { messageId: error.messageId } : {}) }).catch(() => {});
+      throw error;
+    }
+    if (outcome?.reason) await store.append("peer_frame_uncorrelated", { ...context, reason: outcome.reason });
+  };
+}
+
+// The cause travels as the code the thrower already set, lowercased. A message is free text and
+// free text does not belong in a field the façade publishes, so anything without a code is one
+// word.
+function refusalReason(error) { return typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(error.code) ? error.code.toLowerCase() : "frame_handler_failed"; }
 function codedError(code, message) { const error = new Error(message); error.code = code; return error; }

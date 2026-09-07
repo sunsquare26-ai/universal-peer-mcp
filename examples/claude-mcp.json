@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "claude-peer": {
+      "command": "claude-peer-mcp",
+      "args": ["serve"],
+      "env": {}
+    }
+  }
+}

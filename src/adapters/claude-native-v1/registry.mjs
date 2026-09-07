@@ -5,7 +5,8 @@ import path from "node:path";
 import { processStart, processUid, provePermissionMode } from "./darwin-procargs.mjs";
 
 export const DEFAULT_SESSIONS_DIR = path.join(os.homedir(), ".claude", "sessions");
-const REQUIRED_PEER_FEATURES = ["notify_idle", "reply_across_default_dirs"];
+export const SUPPORTED_PEER_PROTOCOL = 1;
+export const REQUIRED_PEER_FEATURES = Object.freeze(["notify_idle", "reply_across_default_dirs"]);
 
 export async function resolveTarget(expected, options = {}) {
   const sessionsDir = options.sessionsDir ?? DEFAULT_SESSIONS_DIR;
@@ -29,7 +30,7 @@ export async function resolveTarget(expected, options = {}) {
   const { row, file } = candidates[0];
   const expectedCwd = await fsp.realpath(expected.cwd); const actualCwd = await fsp.realpath(row.cwd);
   if (expectedCwd !== actualCwd) throw new Error("target cwd mismatch");
-  if (row.peerProtocol !== 1 || !Array.isArray(row.peerFeatures) || REQUIRED_PEER_FEATURES.some((feature) => !row.peerFeatures.includes(feature))) throw new Error("unsupported Claude peer protocol");
+  if (row.peerProtocol !== SUPPORTED_PEER_PROTOCOL || !Array.isArray(row.peerFeatures) || REQUIRED_PEER_FEATURES.some((feature) => !row.peerFeatures.includes(feature))) throw new Error("unsupported Claude peer protocol");
   if (startReader(row.pid) !== row.procStart) throw new Error("target process identity changed");
   const socket = row.messagingSocketPath;
   const socketStat = await fsp.lstat(socket);

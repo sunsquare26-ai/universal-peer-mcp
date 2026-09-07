@@ -4,12 +4,13 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import net from "node:net";
 import { EventStore } from "./core/events.mjs";
-import { PeerCore } from "./core/peer-core.mjs";
+import { frameObserver, PeerCore } from "./core/peer-core.mjs";
 import { loadTargets } from "./core/target-config.mjs";
 import { atomicPrivateWrite, ensurePrivateDirectory, statePaths } from "./core/state-paths.mjs";
 import { localPeerPid } from "./adapters/claude-native-v1/darwin-peerpid.mjs";
 import { processStart, processUid } from "./adapters/claude-native-v1/darwin-procargs.mjs";
 import { startReceiver } from "./adapters/claude-native-v1/receiver.mjs";
+import { directSend } from "./adapters/claude-native-v1/transport.mjs";
 import { MilestoneExtension } from "./extensions/milestone/index.mjs";
 import { CodeReviewExtension, publicLedgerEvent } from "./extensions/code-review/index.mjs";
 
@@ -21,10 +22,23 @@ await daemonLock.writeFile(`${JSON.stringify({ pid: process.pid, procStart: proc
 let targets = {}; try { targets = await loadTargets(paths.targets); } catch (error) { if (error.code !== "ENOENT") throw error; }
 const store = new EventStore(paths); await store.init();
 let core; let milestone = null; let codeReview = null;
+// core and the enabled extensions are read when a frame arrives, not when this is built, which
+// is the only reason the handler can exist before them.
+const onFrame = frameObserver({
+  store,
+  core: { acceptFrame: (frame, peer) => core.acceptFrame(frame, peer) },
+  observers: [(frame, peer) => milestone?.observeFrame(frame, peer), (frame, peer) => codeReview?.observeFrame(frame, peer)]
+});
 const receiver = Object.keys(targets).length > 0
-  ? await startReceiver(async (frame, peer) => { await core.acceptFrame(frame, peer); if (milestone) await milestone.observeFrame(frame, peer); if (codeReview) await codeReview.observeFrame(frame, peer); })
+  ? await startReceiver(
+    onFrame,
+    // A frame whose writer the kernel could not name with the frame is refused before it gets
+    // this far. Both are recorded so that "refused", "arrived and correlated to nothing" and
+    // "nothing arrived" are three different answers here rather than one absence.
+    { onFrameRefused: async (refusal) => { await store.append("peer_frame_refused", refusal); } }
+  )
   : { address: "uds:/unpublished/claude-peer-mcp.sock", sessionId: null, close: async () => {} };
-core = new PeerCore({ targets, store, address: receiver.address });
+core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
 if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });
 const token = crypto.randomBytes(32).toString("hex"); let closing = false;
@@ -78,6 +92,12 @@ async function shutdown() {
   await Promise.allSettled([serverClosed, receiver.close(), store.close()]);
   await daemonLock.close().catch(() => {});
   await Promise.allSettled([paths.controlSocket, paths.controlToken, paths.daemon, paths.daemonLock].map((file) => fsp.unlink(file))); process.exit(0);
+}
+// A written connection is held until the receiver closes it. When our own bound ends the hold
+// first, that is written down: the bound stops an unbounded hold, it does not promise that the
+// bytes were read. See docs/known-issues.md.
+function boundedSender(target, frames, options) {
+  return directSend(target, frames, { ...options, onHoldBound: (detail) => store.append("peer_socket_hold_bounded", detail) });
 }
 function safeEqual(a, b) { if (typeof a !== "string" || typeof b !== "string") return false; const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && crypto.timingSafeEqual(x, y); }
 function publicSendArgs(args) {
