@@ -12,7 +12,11 @@
 //
 // The helper deliberately re-implements the process start time reader instead of
 // importing the one under test, so the value the server checks is produced by an
-// independent path.
+// independent path. It renders what Claude Code renders and not what is convenient:
+// UTC, with the two column day padding `ps` produces left alone. An earlier version
+// wrote the local zone with the padding squeezed, which is exactly what the reader
+// under test used to produce, so the two agreed here and disagreed with every real
+// session — the end to end run was green while nothing resolved on this machine.
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -76,6 +80,9 @@ function readMessage(frame) {
   const content = frame?.message?.content;
   if (typeof content !== "string") return null;
   const lines = content.split("\n");
+  // The stand-in reads what the envelope actually declares. A sender that cannot prove its own
+  // permission mode declares none, so this is expected to be null for every message this
+  // package writes, and the end to end test asserts that rather than a mode.
   const mode = /from-mode="([a-z]+)"/.exec(lines[0] ?? "")?.[1] ?? null;
   const name = /from-name="([^"]*)"/.exec(lines[0] ?? "")?.[1] ?? null;
   let body = null; try { body = JSON.parse(lines.slice(1, -1).join("\n")); } catch { return null; }
@@ -94,8 +101,8 @@ async function respond({ message, subscriptionId }) {
     const frames = [
       { type: "auth", token },
       { type: "control", action: "peer_message_status", msgV: 1, msg_id: crypto.randomUUID(), orig_msg_id: message.transportMessageId, status: "delivered", session_id: sessionId, from: address },
-      envelope(ackId, `PEER_ACK v=1 message_id=${ackId} thread_id=${message.threadId} reply_to=${message.messageId}`),
-      envelope(replyId, `PEER_REPLY v=1 message_id=${replyId} thread_id=${message.threadId} reply_to=${message.messageId} verdict=pass\nthe stand-in peer answered one message`),
+      frame(ackId, wrapped(`PEER_ACK v=1 message_id=${ackId} thread_id=${message.threadId} reply_to=${message.messageId}`)),
+      frame(replyId, wrapped(`PEER_REPLY v=1 message_id=${replyId} thread_id=${message.threadId} reply_to=${message.messageId} verdict=pass\nthe stand-in peer answered one message`)),
       { type: "control", action: "peer_idle_notice", msgV: 1, msg_id: crypto.randomUUID(), orig_msg_id: subscriptionId, state: "idle", session_id: sessionId, from: address }
     ];
     await write(target, frames);
@@ -103,8 +110,21 @@ async function respond({ message, subscriptionId }) {
   } catch (error) { await log({ event: "answer_failed", reason: error?.message ?? "unknown" }); }
 }
 
-function envelope(messageId, content) {
+function frame(messageId, content) {
   return { type: "user", msgV: 1, msg_id: messageId, uuid: crypto.randomUUID(), session_id: sessionId, from: address, message: { role: "user", content } };
+}
+
+// A peer answers inside the wrapper, and this stand-in did not — it wrote the marker as the first
+// byte of the message, which is a shape no session on the other side of this protocol produces.
+// That is what let the fault this pins live through every green run: `parseMarker` is anchored at
+// the first line, the first line of a real answer is the opening tag, so every real ACK and
+// every real reply ended as `no_reply_marker` while this file's answers correlated perfectly.
+// Written out here rather than imported from `src/` on purpose, like the start time reader above:
+// what the receiving end has to cope with is the far side's shape, and a copy of our own builder
+// would only ever agree with our own reader.
+const DISPLAY_NAME = "Claude Code";
+function wrapped(body) {
+  return `<cross-session-message from="${address}" from-name="${DISPLAY_NAME}">\n${body}\n</cross-session-message>`;
 }
 
 // The reply is written and then the connection is closed — really closed, on a bound, not
@@ -152,7 +172,7 @@ function parseArguments(argv) {
   return values;
 }
 function required(name) { const value = options[name]; if (!value) throw new Error(`missing --${name}`); return value; }
-function processStart(pid) { return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim().replace(/\s+/g, " "); }
+function processStart(pid) { return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", env: { ...process.env, TZ: "UTC" } }).trim(); }
 function sha256(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
 function equal(left, right) {
   if (typeof left !== "string" || typeof right !== "string") return false;

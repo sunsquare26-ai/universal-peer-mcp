@@ -67,7 +67,7 @@ describe("modern 2026-07-28", () => {
   test("discovers, lists deterministically, and calls without initialize", async () => {
     const facade = createFacade(options); const meta = modernMeta();
     const discover = await facade.handle({ jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: meta } });
-    expect(discover.result.resultType).toBe("complete"); expect(discover.result.supportedVersions).toEqual(["2026-07-28"]); expect(discover.result._meta["io.modelcontextprotocol/serverInfo"].name).toBe("claude-peer-mcp");
+    expect(discover.result.resultType).toBe("complete"); expect(discover.result.supportedVersions).toEqual(["2026-07-28"]); expect(discover.result._meta["io.modelcontextprotocol/serverInfo"].name).toBe("universal-peer-mcp");
     const first = await facade.handle({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: meta } });
     const second = await facade.handle({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: meta } });
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
@@ -176,22 +176,29 @@ describe("modern 2026-07-28", () => {
     const statusEvent = { seq: 1, type: "peer_message_status", at: "2026-09-03T00:00:00.000Z", messageId, status: "delivered", evidence: "message_status" };
     const idleEvent = { seq: 2, type: "peer_idle_notice", at: "2026-09-03T00:00:01.000Z", messageId, subscriptionId: rawIdleEvent.subscriptionId, state: "idle", evidence: "idle_notice" };
     const results = {
-      peer_targets: [{ alias: "review", connected: false, permissionMode: "bypass", expectedDisplayName: "Review", observedDisplayName: null, token: "private", socketPath: "/private.sock" }],
+      peer_targets: { targets: [{ alias: "review", connected: false, permissionMode: "bypass", expectedDisplayName: "Review", observedDisplayName: null, token: "private", socketPath: "/private.sock" }] },
       peer_status: { alias: "review", connected: true, sessionId: crypto.randomUUID(), cwdMatches: true, permission: { mode: "bypass", verifiedBy: "kern_procargs2", argv: ["private"] }, observedDisplayName: "Review", pid: 123, procStart: "start", token: "private", socketPath: "/private.sock" },
       peer_wait: { event: rawStatusEvent, events: [rawStatusEvent], evidence: "message_status" },
       peer_list_events: { cursor: 2, events: [rawStatusEvent, rawIdleEvent] },
       daemon_shutdown: { shuttingDown: true }
     };
-    const expectedResults = { ...results, peer_targets: [{ alias: "review", connected: false, permissionMode: "bypass", expectedDisplayName: "Review", observedDisplayName: null }], peer_status: { alias: "review", connected: true, sessionId: results.peer_status.sessionId, cwdMatches: true, permission: { mode: "bypass", verifiedBy: "kern_procargs2" }, observedDisplayName: "Review", pid: 123, procStart: "start" }, peer_wait: { event: statusEvent, events: [statusEvent], evidence: "message_status" }, peer_list_events: { cursor: 2, events: [statusEvent, idleEvent] } };
+    const expectedResults = { ...results, peer_targets: { targets: [{ alias: "review", connected: false, permissionMode: "bypass", expectedDisplayName: "Review", observedDisplayName: null }] }, peer_status: { alias: "review", connected: true, sessionId: results.peer_status.sessionId, cwdMatches: true, permission: { mode: "bypass", verifiedBy: "kern_procargs2" }, observedDisplayName: "Review", pid: 123, procStart: "start" }, peer_wait: { event: statusEvent, events: [statusEvent], evidence: "message_status" }, peer_list_events: { cursor: 2, events: [statusEvent, idleEvent] } };
     const definitions = toolDefinitions(["review"], { admin: true });
     const facade = createFacade({ tools: definitions, callTool: async (name) => results[name] });
     for (const [index, [name]] of Object.entries(results).entries()) {
       const response = await facade.handle({ jsonrpc: "2.0", id: index + 1, method: "tools/call", params: { _meta: modernMeta(), name, arguments: name === "peer_status" ? { alias: "review" } : name === "peer_wait" ? { messageId } : {} } });
       expect(response.result.isError).toBeUndefined(); expect(response.result.structuredContent).toEqual(expectedResults[name]); expect(JSON.stringify(response)).not.toContain("private");
     }
-    const errorSchema = definitions.find((tool) => tool.name === "peer_status").outputSchema;
-    expect(validateSchema(errorSchema, { reason: "target_unavailable" })).toEqual({ valid: true, errors: [] });
-    expect(validateSchema(errorSchema, { reason: "target_unavailable", detail: "hidden" }).valid).toBeFalse();
+    // The failure shape is not a branch of the output schema. outputSchema describes the
+    // structuredContent of a successful call, and a refusal is isError with a bare reason, so
+    // both halves are read here: the schema does not admit the failure, the answer still is it.
+    const successSchema = definitions.find((tool) => tool.name === "peer_status").outputSchema;
+    expect(successSchema.type).toBe("object");
+    expect(validateSchema(successSchema, { reason: "target_unavailable" }).valid).toBeFalse();
+    const unavailable = await createFacade({ tools: definitions, callTool: async () => { const error = new Error("unsupported Claude peer protocol"); error.code = "TARGET_UNAVAILABLE"; throw error; } }).handle({ jsonrpc: "2.0", id: 99, method: "tools/call", params: { _meta: modernMeta(), name: "peer_status", arguments: { alias: "review" } } });
+    expect(unavailable.result.isError).toBe(true);
+    expect(unavailable.result.structuredContent).toEqual({ reason: "target_unavailable" });
+    expect(Object.keys(unavailable.result.structuredContent)).toEqual(["reason"]);
   });
 
   test("projects evidence sequences produced by PeerCore", async () => {

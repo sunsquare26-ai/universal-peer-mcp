@@ -36,7 +36,7 @@ Your five arguments are first written as one canonical JSON line — that exact 
 (`src/adapters/claude-native-v1/protocol.mjs`). The target session sees this, and nothing else:
 
 ```text
-<cross-session-message from="uds:/path/to/state/claude-peer-mcp.sock" from-name="Claude MCP" from-mode="prompting">
+<cross-session-message from="uds:/path/to/state/universal-peer-mcp.sock" from-name="universal-peer-mcp">
 {"alias":"frontend-review","messageId":"10000000-0000-4000-8000-000000000021","threadId":"10000000-0000-4000-8000-000000000020","replyTo":null,"kind":"review_request","body":"Run the test suite in /path/to/project and report pass or fail."}
 </cross-session-message>
 ```
@@ -46,8 +46,15 @@ canonical form always carries all six keys, so the same message always hashes th
 `body` is the string you sent, quoted inside that line — the wrapper does not paraphrase it.
 
 `from` is your own daemon's private socket path on a real machine; the placeholder here is the
-sanitized stand-in. `from-mode` is the sender's proved permission mode. It is recorded by the
-receiver and never acted on: an inbound mode never widens anything.
+sanitized stand-in. There is no `from-mode`, and its absence is the message: the daemon
+authenticates the process that connected to it, not the Claude session behind that process, so
+this package cannot prove what the sender is allowed to do and does not say. What that costs the
+receiver is written down in [known-issues.md](known-issues.md) §10.
+
+`body` is copied in with one substitution, the same one Claude Code's own sender makes: a closing
+`</cross-session-message>` inside a body is written `<\/cross-session-message>` so that a body
+cannot end the envelope that carries it. Nothing else about the body is rewritten — `<` in code
+stays `<`, and the substitution is invisible through `JSON.parse`, which reads `\/` as `/`.
 
 If you are on the receiving side, read `body` out of that JSON line and answer with a marker as
 shown next. The marker goes in your reply message, not inside the JSON.

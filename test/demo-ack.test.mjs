@@ -20,9 +20,13 @@ const demo = await fsp.readFile(path.join(ROOT, "docs/demo-ack.md"), "utf8");
 
 function firstLine(prefix) { return demo.split("\n").find((line) => line.startsWith(prefix)); }
 
-test("the envelope wrapper refuses an address or a mode it cannot prove", () => {
-  expect(() => senderEnvelope({ from: "/path/to/state/claude-peer-mcp.sock", body: "x", permissionMode: fixture.permissionMode })).toThrow("invalid sender address");
-  expect(() => senderEnvelope({ from: fixture.senderAddress, body: "x", permissionMode: "root" })).toThrow("invalid sender permission mode");
+test("the envelope wrapper refuses an address it cannot recognise, and carries no mode at all", () => {
+  expect(() => senderEnvelope({ from: "/path/to/state/universal-peer-mcp.sock", body: "x" })).toThrow("invalid sender address");
+  // A mode handed to the wrapper is not honoured, corrected or rejected — there is no parameter
+  // for it. The wire form is the same whatever the caller believes about anyone's permissions.
+  const bare = senderEnvelope({ from: fixture.senderAddress, body: "x" });
+  expect(senderEnvelope({ from: fixture.senderAddress, body: "x", permission: { mode: "bypass", verifiedBy: "kern_procargs2" }, permissionMode: "root" })).toBe(bare);
+  for (const attribute of ["from-mode=", "from-mode-verified-by=", "from_mode"]) expect(bare).not.toContain(attribute);
 });
 
 test("the demo ACK line parses with the shipped marker parser", () => {
@@ -65,9 +69,9 @@ test("redaction removes what an unsanitized capture of the same round trip would
   const home = os.homedir();
   const unsafe = {
     alias: fixture.alias,
-    socketPath: `${home}/Library/Application Support/claude-peer-mcp/control.sock`,
+    socketPath: `${home}/Library/Application Support/universal-peer-mcp/control.sock`,
     controlToken: "f".repeat(64),
-    envelope: senderEnvelope({ from: `uds:${home}/Library/state/claude-peer-mcp.sock`, body: `Bearer ${"a".repeat(24)} at ${home}/project`, permissionMode: "prompting" }),
+    envelope: senderEnvelope({ from: `uds:${home}/Library/state/universal-peer-mcp.sock`, body: `Bearer ${"a".repeat(24)} at ${home}/project`, permission: { mode: "prompting", verifiedBy: "kern_procargs2" } }),
     note: `failed at ${home}/project with sk-${"A".repeat(24)}`
   };
   const clean = redactPublic(unsafe);

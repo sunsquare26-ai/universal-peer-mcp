@@ -26,7 +26,7 @@ test("authenticated local UDS sends once after identity recheck", async () => {
   const expected = { sessionId: receiver.sessionId, cwd: process.cwd(), expectedDisplayName: "Changed label", permissionMode: "prompting" };
   const options = { sessionsDir, argvReader: () => [process.execPath, "--permission-mode", "default"], startReader: processStart };
   const target = await resolveTarget(expected, options);
-  const frames = outboundFrames({ token: target.token, targetSessionId: target.sessionId, senderAddress: receiver.address, permissionMode: "prompting", messageId: "10000000-0000-4000-8000-000000000030", subscriptionId: "10000000-0000-4000-8000-000000000031", content: "fixture" });
+  const frames = outboundFrames({ token: target.token, targetSessionId: target.sessionId, senderAddress: receiver.address, permission: { mode: "prompting", verifiedBy: "kern_procargs2" }, messageId: "10000000-0000-4000-8000-000000000030", subscriptionId: "10000000-0000-4000-8000-000000000031", content: "fixture" });
   const result = await directSend(target, frames, { reverify: () => reverifyTarget(target, expected, options) });
   expect(result.bytesWritten).toBeGreaterThan(0);
   await Bun.sleep(20); expect(framesSeen.map((frame) => frame.type)).toEqual(["user", "control"]);

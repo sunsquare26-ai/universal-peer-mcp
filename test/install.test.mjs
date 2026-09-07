@@ -38,9 +38,9 @@ test("the packed tarball installs into an empty prefix and the installed bin run
     const first = await run("npm", npmArgs(work, ["pack", "--pack-destination", tarDir, "--json"]), { cwd: ROOT });
     expect(first.code).toBe(0);
     const report = JSON.parse(first.stdout.slice(first.stdout.indexOf("[")))[0];
-    expect(report.name).toBe("claude-peer-mcp");
-    const tarball = path.join(tarDir, `claude-peer-mcp-${VERSION}.tgz`);
-    expect(report.filename).toBe(`claude-peer-mcp-${VERSION}.tgz`);
+    expect(report.name).toBe("universal-peer-mcp");
+    const tarball = path.join(tarDir, `universal-peer-mcp-${VERSION}.tgz`);
+    expect(report.filename).toBe(`universal-peer-mcp-${VERSION}.tgz`);
     const bytes = await fsp.readFile(tarball);
     expect(bytes.length).toBe(report.size);
     expect(crypto.createHash("sha1").update(bytes).digest("hex")).toBe(report.shasum);
@@ -54,8 +54,8 @@ test("the packed tarball installs into an empty prefix and the installed bin run
     // 2. install that exact tarball into an empty prefix
     const install = await run("npm", npmArgs(work, ["install", "-g", "--prefix", prefix, tarball]), { cwd: work });
     expect(install.code).toBe(0);
-    const home = path.join(prefix, "lib", "node_modules", "claude-peer-mcp");
-    const bin = path.join(prefix, "bin", "claude-peer-mcp");
+    const home = path.join(prefix, "lib", "node_modules", "universal-peer-mcp");
+    const bin = path.join(prefix, "bin", "universal-peer-mcp");
     expect((await fsp.lstat(bin)).isSymbolicLink() || (await fsp.stat(bin)).isFile()).toBe(true);
     expect(await missing(path.join(home, "node_modules"))).toBe(true);
     for (const shipped of ["targets.example.json", "README.md", "LICENSE", "docs/demo-ack.md", "docs/configuration.md", "examples/claude-mcp.json", "examples/codex-config.toml", "src/doctor.mjs"]) {
@@ -65,7 +65,7 @@ test("the packed tarball installs into an empty prefix and the installed bin run
 
     // 3. the installed bin runs, reports zero targets, and creates nothing
     const state = path.join(work, "state");
-    let doctor = await run(bin, ["doctor"], { env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: state } });
+    let doctor = await run(bin, ["doctor"], { env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: state } });
     expect(doctor.stderr).toBe("");
     expect(doctor.code).toBe(0);
     let document = JSON.parse(doctor.stdout);
@@ -76,7 +76,7 @@ test("the packed tarball installs into an empty prefix and the installed bin run
     expect(await missing(state)).toBe(true);
 
     // 4. the default state directory lives outside the installed package
-    const bareEnv = { ...process.env }; delete bareEnv.CLAUDE_PEER_MCP_STATE_DIR;
+    const bareEnv = { ...process.env }; delete bareEnv.UNIVERSAL_PEER_MCP_STATE_DIR; delete bareEnv.CLAUDE_PEER_MCP_STATE_DIR;
     const bare = await run(bin, ["doctor"], { env: bareEnv });
     expect(bare.code).toBe(0);
     expect(JSON.parse(bare.stdout).stateDirectory).toBe("~/Library/Application Support/claude-peer-mcp");
@@ -87,7 +87,7 @@ test("the packed tarball installs into an empty prefix and the installed bin run
     const example = JSON.parse(await fsp.readFile(path.join(home, "targets.example.json"), "utf8"));
     example["frontend-review"].cwd = await fsp.realpath(project);
     await fsp.writeFile(path.join(state, "targets.json"), JSON.stringify(example, null, 2), { mode: 0o600 });
-    doctor = await run(bin, ["doctor"], { env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: state } });
+    doctor = await run(bin, ["doctor"], { env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: state } });
     expect(doctor.code).toBe(0);
     document = JSON.parse(doctor.stdout);
     expect(document.targets).toMatchObject({ ok: true, present: true, schemaValid: true, count: 1 });
@@ -96,13 +96,13 @@ test("the packed tarball installs into an empty prefix and the installed bin run
     expect(JSON.stringify(document)).not.toContain(work);
 
     // 6. an unknown subcommand exits 2 without touching anything
-    const usage = await run(bin, ["not-a-command"], { env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: state } });
+    const usage = await run(bin, ["not-a-command"], { env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: state } });
     expect(usage.code).toBe(2);
     expect(usage.stdout).toBe("");
-    expect(usage.stderr).toContain("usage: claude-peer-mcp");
+    expect(usage.stderr).toContain("usage: universal-peer-mcp");
 
     // 7. uninstalling removes the package and leaves the user's state alone
-    const uninstall = await run("npm", npmArgs(work, ["uninstall", "-g", "--prefix", prefix, "claude-peer-mcp"]), { cwd: work });
+    const uninstall = await run("npm", npmArgs(work, ["uninstall", "-g", "--prefix", prefix, "universal-peer-mcp"]), { cwd: work });
     expect(uninstall.code).toBe(0);
     expect(await missing(home)).toBe(true);
     expect(await missing(bin)).toBe(true);

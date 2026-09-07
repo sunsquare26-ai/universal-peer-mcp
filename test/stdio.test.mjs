@@ -14,7 +14,7 @@ afterEach(async () => { for (const pid of daemonPids.splice(0)) { try { process.
 
 async function runRaw(input, expectedCount, extraEnv = {}) {
   const made = await fsp.mkdtemp(path.join(os.tmpdir(), "peer-stdio-")); roots.push(made); await fsp.chmod(made, 0o700); const root = await fsp.realpath(made);
-  const child = spawn("bun", ["src/server.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, ...extraEnv, CLAUDE_PEER_MCP_STATE_DIR: root } });
+  const child = spawn("bun", ["src/server.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, ...extraEnv, UNIVERSAL_PEER_MCP_STATE_DIR: root } });
   let stdout = ""; let stderr = ""; child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8"); child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; });
   child.stdin.end(input);
   const deadline = Date.now() + 10_000; while (stdout.split("\n").filter(Boolean).length < expectedCount && Date.now() < deadline) await Bun.sleep(10);
@@ -23,8 +23,14 @@ async function runRaw(input, expectedCount, extraEnv = {}) {
   if (stderr) throw new Error(stderr); return { stdout, rows: stdout.split("\n").filter(Boolean).map(JSON.parse), daemon };
 }
 
+// What the façade puts on a command that can reach a target: the daemon it just read and the
+// table that daemon says it is holding. A command that carries none is refused before dispatch
+// (src/daemon.mjs), so a caller standing where the façade stands carries one. The daemon is
+// restarted between rounds below, so it is taken again each time rather than once.
+function checkedAgainst(status) { return { daemonPid: status.pid, daemonProcStart: status.procStart, targetsDigest: status.targetsDigest }; }
+
 async function startDaemon(root, extension = "") {
-  const daemon = spawn("bun", ["src/daemon.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: extension } });
+  const daemon = spawn("bun", ["src/daemon.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: extension } });
   daemonPids.push(daemon.pid); const file = statePaths(root).daemon;
   for (let i = 0; i < 200 && !(await Bun.file(file).exists()); i += 1) await Bun.sleep(10);
   return JSON.parse(await fsp.readFile(file, "utf8"));
@@ -75,10 +81,11 @@ test("milestone tools are optional and one durable store replays across off-on-o
   for (const extension of ["", "milestone", ""]) {
     const daemon = await startDaemon(root, extension);
     const status = await controlCall("daemon_status", {}, { root }); expect(status.enabledExtensions).toEqual(extension ? ["milestone"] : []);
+    const sending = { root, expect: checkedAgainst(status) };
     const before = (await controlCall("peer_list_events", { messageId: args.messageId }, { root })).events.length;
-    for (const extra of [{ recovery: true }, { afterReservation: "inject" }]) await expect(controlCall("peer_send", { ...args, ...extra }, { root })).rejects.toMatchObject({ code: "INVALID_CONTROL_ARGUMENTS" });
+    for (const extra of [{ recovery: true }, { afterReservation: "inject" }]) await expect(controlCall("peer_send", { ...args, ...extra }, sending)).rejects.toMatchObject({ code: "INVALID_CONTROL_ARGUMENTS" });
     expect((await controlCall("peer_list_events", { messageId: args.messageId }, { root })).events).toHaveLength(before);
-    expect(await controlCall("peer_send", args, { root })).toMatchObject({ replay: true, messageId: args.messageId });
+    expect(await controlCall("peer_send", args, sending)).toMatchObject({ replay: true, messageId: args.messageId });
     expect((await controlCall("peer_list_events", { messageId: args.messageId }, { root })).events.some((event) => event.type === "send_recovery_reserved")).toBeFalse();
     await stopDaemon(root, daemon.pid);
   }
@@ -91,9 +98,9 @@ test("milestone tools are optional and one durable store replays across off-on-o
 test("a running daemon is the extension authority and reports launch mismatch", async () => {
   const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} };
   const made = await fsp.mkdtemp(path.join(os.tmpdir(), "peer-stdio-authority-")); roots.push(made); await fsp.chmod(made, 0o700); const root = await fsp.realpath(made);
-  const daemon = spawn("bun", ["src/daemon.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: root } }); daemonPids.push(daemon.pid);
+  const daemon = spawn("bun", ["src/daemon.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: root } }); daemonPids.push(daemon.pid);
   const daemonFile = path.join(root, "daemon.json"); for (let i = 0; i < 200 && !(await Bun.file(daemonFile).exists()); i += 1) await Bun.sleep(10);
-  const child = spawn("bun", ["src/server.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: "milestone" } });
+  const child = spawn("bun", ["src/server.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: "milestone" } });
   let stdout = ""; child.stdout.setEncoding("utf8"); child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stdin.end([JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: meta } }), JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: meta, name: "daemon_status", arguments: {} } })].join("\n") + "\n");
   for (let i = 0; i < 200 && stdout.split("\n").filter(Boolean).length < 2; i += 1) await Bun.sleep(10); child.kill("SIGTERM"); const rows = stdout.split("\n").filter(Boolean).map(JSON.parse);
@@ -103,9 +110,9 @@ test("a running daemon is the extension authority and reports launch mismatch", 
 test("an extension-enabled daemon reports a reverse launch mismatch without losing its tools", async () => {
   const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} };
   const made = await fsp.mkdtemp(path.join(os.tmpdir(), "peer-stdio-reverse-")); roots.push(made); await fsp.chmod(made, 0o700); const root = await fsp.realpath(made);
-  const daemon = spawn("bun", ["src/daemon.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: "milestone" } }); daemonPids.push(daemon.pid);
+  const daemon = spawn("bun", ["src/daemon.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: "milestone" } }); daemonPids.push(daemon.pid);
   const daemonFile = path.join(root, "daemon.json"); for (let i = 0; i < 200 && !(await Bun.file(daemonFile).exists()); i += 1) await Bun.sleep(10);
-  const child = spawn("bun", ["src/server.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: "" } });
+  const child = spawn("bun", ["src/server.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: "" } });
   let stdout = ""; child.stdout.setEncoding("utf8"); child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stdin.end([JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: meta } }), JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: meta, name: "daemon_status", arguments: {} } })].join("\n") + "\n");
   for (let i = 0; i < 200 && stdout.split("\n").filter(Boolean).length < 2; i += 1) await Bun.sleep(10); child.kill("SIGTERM"); const rows = stdout.split("\n").filter(Boolean).map(JSON.parse);

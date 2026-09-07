@@ -25,13 +25,6 @@ export function redactPublic(value) {
     .replace(ABSOLUTE_PATH, "[path]");
 }
 
-export const TOOL_ERROR_SCHEMA = Object.freeze({
-  type: "object",
-  required: ["reason"],
-  properties: { reason: { type: "string", enum: ["invalid_public_result", "message_id_conflict", "delivery_uncertain", "target_unavailable", "internal_failure"] } },
-  additionalProperties: false
-});
-
 export function publicToolFailure(cause) {
   return ({
     INVALID_PUBLIC_RESULT: { reason: "invalid_public_result" },

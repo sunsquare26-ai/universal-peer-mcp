@@ -2,7 +2,7 @@
 
 영문 [README](../README.md) 와 같은 내용을 한국어 독자용으로 정리한 문서다. 명령은 그대로 복사해 쓸 수 있다.
 
-`claude-peer-mcp` 는 같은 Mac, 같은 사용자 계정 안에서만 도는 로컬 MCP 서버다. Codex 나 다른 Claude Code 가, **이미 실행 중이고 사용자가 허용 목록에 직접 넣은** Claude Code 세션에 말을 걸게 해 준다. 세션을 대신 띄우지 않고, 네트워크 포트를 열지 않는다.
+`universal-peer-mcp` 는 같은 Mac, 같은 사용자 계정 안에서만 도는 로컬 MCP 서버다. Codex 나 다른 Claude Code 가, **이미 실행 중이고 사용자가 허용 목록에 직접 넣은** Claude Code 세션에 말을 걸게 해 준다. 세션을 대신 띄우지 않고, 네트워크 포트를 열지 않는다.
 
 ## 신뢰 경계 넷
 
@@ -30,16 +30,16 @@
 
 | 경로 | 상태 |
 |---|---|
-| `npm install -g claude-peer-mcp` | **아직 안 된다.** 레지스트리 공개 전이라 이 명령은 실패한다. `npx -y claude-peer-mcp` 도 같다 |
-| `npm install -g "github:sunsquare26-ai/claude-peer-mcp#<tag>"` | **저장소가 공개된 뒤 된다.** `<tag>` 는 Releases 의 태그로 바꾼다. 저장소가 아직 공개 전이라 여기서 실측하지 않았다 |
+| `npm install -g universal-peer-mcp` | **아직 안 된다.** 레지스트리 공개 전이라 이 명령은 실패한다. `npx -y universal-peer-mcp` 도 같다 |
+| `npm install -g "github:sunsquare26-ai/universal-peer-mcp#<tag>"` | **저장소가 공개된 뒤 된다.** `<tag>` 는 Releases 의 태그로 바꾼다. 저장소가 아직 공개 전이라 여기서 실측하지 않았다 |
 | 직접 pack 한 tarball 을 설치 | **실측했다.** `test/install.test.mjs` 가 pack → 빈 prefix 에 설치 → 설치된 bin 실행 → 제거까지 네트워크 없이 돌린다 |
 
 clone 에서 시작한다면 검증된 경로는 두 줄이다.
 
 ```sh
 npm pack
-npm install -g "./claude-peer-mcp-$(node -p "require('./package.json').version").tgz"
-claude-peer-mcp doctor
+npm install -g "./universal-peer-mcp-$(node -p "require('./package.json').version").tgz"
+universal-peer-mcp doctor
 ```
 
 `doctor` 는 읽기만 한다. 토큰·프로세스 인자를 출력하지 않고, 내 홈을 가리키는 `~` 말고는 절대경로를 찍지 않는다.
@@ -53,6 +53,7 @@ claude-peer-mcp doctor
   "arch": "arm64",
   "runtime": "Bun 1.3.11",
   "stateDirectory": "~/Library/Application Support/claude-peer-mcp",
+  "stateDirectorySource": "default",
   "note": "doctor does not print tokens or process arguments",
   "writes": "none — doctor never creates the state directory or any file"
 }
@@ -87,7 +88,7 @@ claude-peer-mcp doctor
 ```sh
 mkdir -p ~/Library/Application\ Support/claude-peer-mcp
 chmod 700 ~/Library/Application\ Support/claude-peer-mcp
-cp "$(npm root -g)/claude-peer-mcp/targets.example.json" ~/Library/Application\ Support/claude-peer-mcp/targets.json
+cp "$(npm root -g)/universal-peer-mcp/targets.example.json" ~/Library/Application\ Support/claude-peer-mcp/targets.json
 chmod 600 ~/Library/Application\ Support/claude-peer-mcp/targets.json
 ```
 
@@ -116,14 +117,14 @@ chmod 600 ~/Library/Application\ Support/claude-peer-mcp/targets.json
 ## 5. MCP 클라이언트에 등록한다
 
 ```sh
-codex mcp add claude-peer -- claude-peer-mcp serve
-claude mcp add claude-peer -- claude-peer-mcp serve
+codex mcp add claude-peer -- universal-peer-mcp serve
+claude mcp add claude-peer -- universal-peer-mcp serve
 ```
 
 설정 파일로 넣으려면 [../examples/codex-config.toml](../examples/codex-config.toml) 과 [../examples/claude-mcp.json](../examples/claude-mcp.json) 을 쓴다. 선택 확장은 기본 꺼짐이고 데몬을 띄울 때만 켜진다.
 
 ```sh
-claude-peer-mcp serve --enable milestone --enable code-review
+universal-peer-mcp serve --enable milestone --enable code-review
 ```
 
 ## 6. 데몬을 다시 띄운다
@@ -159,7 +160,7 @@ kill "$(plutil -extract pid raw -- ~/Library/Application\ Support/claude-peer-mc
 
 ## 답할 때 — ACK/REPLY 형식
 
-받은 쪽 세션은 `<cross-session-message ...>` 로 감싼 메시지를 본다. 열린 태그에는 보낸 쪽 주소와 `from-mode` 가 들어 있고, 감싼 안쪽은 사람 말이 아니라 `alias`·`messageId`·`threadId`·`replyTo`·`kind`·`body` 여섯 칸을 담은 JSON 한 줄이다. 사람이 쓴 지시는 그 `body` 에 들어 있다. 실제로 오가는 바이트는 [demo-ack.md](demo-ack.md) 2절에 그대로 있다.
+받은 쪽 세션은 `<cross-session-message ...>` 로 감싼 메시지를 본다. 열린 태그에는 보낸 쪽 주소와 표시 이름만 들어 있다 — 권한 등급은 들어 있지 않고, 그 이유와 대가는 [known-issues.md](known-issues.md) §10 에 있다. 감싼 안쪽은 사람 말이 아니라 `alias`·`messageId`·`threadId`·`replyTo`·`kind`·`body` 여섯 칸을 담은 JSON 한 줄이다. 사람이 쓴 지시는 그 `body` 에 들어 있다. 실제로 오가는 바이트는 [demo-ack.md](demo-ack.md) 2절에 그대로 있다.
 
 답을 표식으로 인식시키려면 **메시지의 첫 줄**이 아래 형태여야 한다. 첫 줄이 아니면 표식으로 잡히지 않는다.
 
@@ -195,7 +196,7 @@ PEER_REPLY v=1 message_id=<새 UUID> thread_id=<받은 thread_id> reply_to=<받�
 kill "$(plutil -extract pid raw -- ~/Library/Application\ Support/claude-peer-mcp/daemon.json)"
 codex mcp remove claude-peer
 claude mcp remove claude-peer
-npm uninstall -g claude-peer-mcp
+npm uninstall -g universal-peer-mcp
 rm -rf ~/Library/Application\ Support/claude-peer-mcp
 ```
 

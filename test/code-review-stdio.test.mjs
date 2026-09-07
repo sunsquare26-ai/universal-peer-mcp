@@ -20,7 +20,7 @@ const fx = (n) => `10000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 async function runRaw(input, expectedCount, extraEnv = {}, root = null) {
   if (!root) { const made = await fsp.mkdtemp(path.join(os.tmpdir(), "peer-code-review-stdio-")); roots.push(made); await fsp.chmod(made, 0o700); root = await fsp.realpath(made); }
-  const child = spawn("bun", ["src/server.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, ...extraEnv, CLAUDE_PEER_MCP_STATE_DIR: root } });
+  const child = spawn("bun", ["src/server.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, ...extraEnv, UNIVERSAL_PEER_MCP_STATE_DIR: root } });
   let stdout = ""; let stderr = ""; child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8"); child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; });
   child.stdin.end(input);
   const deadline = Date.now() + 10_000; while (stdout.split("\n").filter(Boolean).length < expectedCount && Date.now() < deadline) await Bun.sleep(10);
@@ -30,7 +30,7 @@ async function runRaw(input, expectedCount, extraEnv = {}, root = null) {
 }
 
 async function startDaemon(root, extension = "") {
-  const daemon = spawn("bun", ["src/daemon.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, CLAUDE_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: extension } });
+  const daemon = spawn("bun", ["src/daemon.mjs"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, UNIVERSAL_PEER_MCP_STATE_DIR: root, CLAUDE_PEER_MCP_EXTENSIONS: extension } });
   daemonPids.push(daemon.pid); const file = statePaths(root).daemon;
   for (let i = 0; i < 200 && !(await Bun.file(file).exists()); i += 1) await Bun.sleep(10);
   return JSON.parse(await fsp.readFile(file, "utf8"));
@@ -71,13 +71,20 @@ test("the control channel records a hash-bound round durably, refuses foreign se
   const made = await fsp.mkdtemp(path.join(os.tmpdir(), "peer-code-review-control-")); roots.push(made); await fsp.chmod(made, 0o700); const root = await fsp.realpath(made); const paths = statePaths(root);
   await fsp.writeFile(paths.targets, `${JSON.stringify({ reviewer: { sessionId: fx(900), cwd: root, permissionMode: "prompting" } })}\n`, { mode: 0o600 });
   const daemon = await startDaemon(root, "code-review"); expect(daemon.enabledExtensions).toEqual(["code-review"]);
+  // A request can reach a target, so it carries what the façade carries: the daemon this caller
+  // just read and the table that daemon says it is holding. One that carries none is refused
+  // before dispatch (src/daemon.mjs), whoever the caller is.
+  const status = await controlCall("daemon_status", {}, { root });
+  const requesting = { root, expect: { daemonPid: status.pid, daemonProcStart: status.procStart, targetsDigest: status.targetsDigest } };
   const args = { alias: "reviewer", reviewId: fx(101), requestMessageId: fx(102), threadId: fx(103), targetKind: "design", artifactHash: "0f".repeat(32), scope: ["docs/design.md"], nonGoals: [], evidence: [] };
   expect(await controlCall("code_review_status", { reviewId: fx(101) }, { root })).toEqual({ found: false, passed: false, state: "not_found", cursor: 0 });
   await expect(controlCall("code_review_request", args, { root })).rejects.toMatchObject({ code: "TARGET_UNAVAILABLE" });
+  expect(await controlCall("code_review_status", { reviewId: fx(101) }, { root })).toEqual({ found: false, passed: false, state: "not_found", cursor: 0 });
+  await expect(controlCall("code_review_request", args, requesting)).rejects.toMatchObject({ code: "TARGET_UNAVAILABLE" });
   const recorded = await controlCall("code_review_status", { reviewId: fx(101) }, { root }); expect(recorded).toMatchObject({ found: true, passed: false, state: "awaiting_receipt", review: { round: 1, artifactHash: "0f".repeat(32) }, request: { delivery: "unsent", transportMessageId: null } });
-  await expect(controlCall("code_review_request", { ...args, scope: ["docs/other.md"] }, { root })).rejects.toMatchObject({ code: "MESSAGE_ID_CONFLICT" });
-  await expect(controlCall("code_review_request", { ...args, recovery: true }, { root })).rejects.toMatchObject({ code: "CODE_REVIEW_INVALID_ARGUMENTS" });
-  await expect(controlCall("code_review_request", { ...args, afterReservation: "inject" }, { root })).rejects.toMatchObject({ code: "CODE_REVIEW_INVALID_ARGUMENTS" });
+  await expect(controlCall("code_review_request", { ...args, scope: ["docs/other.md"] }, requesting)).rejects.toMatchObject({ code: "MESSAGE_ID_CONFLICT" });
+  await expect(controlCall("code_review_request", { ...args, recovery: true }, requesting)).rejects.toMatchObject({ code: "CODE_REVIEW_INVALID_ARGUMENTS" });
+  await expect(controlCall("code_review_request", { ...args, afterReservation: "inject" }, requesting)).rejects.toMatchObject({ code: "CODE_REVIEW_INVALID_ARGUMENTS" });
   const events = await controlCall("peer_list_events", {}, { root }); expect(events.events.map((event) => event.type)).toEqual(["code_review_requested"]); expect(events.events.some((event) => event.type === "send_recovery_reserved")).toBeFalse();
   const listed = await controlCall("code_review_list", { afterSeq: 0 }, { root }); expect(listed.rounds).toHaveLength(1); expect(listed.rounds[0].history).toEqual([{ round: 1, requestMessageId: fx(102), artifactHash: "0f".repeat(32), verdict: null, receiptMessageId: null, stale: false }]);
   const bytes = JSON.stringify([recorded, listed]); for (const value of ["targetPid", "targetSocketPath", "targetCwd", root]) expect(bytes).not.toContain(value);

@@ -7,19 +7,23 @@
 //
 // This lives beside the end to end test rather than inside it so the rule can be tested on its
 // own, with real processes, in a second rather than in five minutes.
-import { execFileSync } from "node:child_process";
+//
+// The start time is read through the product's own reader on purpose. The value remembered here
+// is the one the daemon published, and a second reader that renders the same instant differently
+// — another zone, another day padding — answers "not the process I remember" for every live
+// daemon and this file stops ending anything it started. Agreement with the publisher is the
+// whole guard; an independent copy of the rendering rule is what makes it drift.
+import { normalizeProcStart, processStart } from "../src/adapters/claude-native-v1/darwin-procargs.mjs";
 
 export function procStartOf(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return null;
-  try {
-    const value = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim().replace(/\s+/g, " ");
-    return value || null;
-  } catch { return null; }                      // ps exits non zero when there is no such pid
+  try { return processStart(pid) || null; }
+  catch { return null; }                        // ps exits non zero when there is no such pid
 }
 
 export function owns(pid, procStart) {
   if (typeof procStart !== "string" || !procStart) return false;
-  return procStartOf(pid) === procStart;
+  return procStartOf(pid) === normalizeProcStart(procStart);
 }
 
 // registry is a Map of pid to the start time recorded when the pid was first seen.

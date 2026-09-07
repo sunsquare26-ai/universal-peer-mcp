@@ -5,6 +5,7 @@ import path from "node:path";
 import { EventStore } from "../src/core/events.mjs";
 import { PeerCore } from "../src/core/peer-core.mjs";
 import { canonicalSend, sha256 } from "../src/core/dedupe.mjs";
+import { SENDER_PRODUCT_NAME, senderEnvelope } from "../src/adapters/claude-native-v1/protocol.mjs";
 import { statePaths } from "../src/core/state-paths.mjs";
 import { CodeReviewExtension, MAX_ROUNDS, parseReceipt, publicLedgerEvent, requestBody } from "../src/extensions/code-review/index.mjs";
 import { createFacade, modernMeta } from "../src/mcp/facade.mjs";
@@ -133,7 +134,7 @@ describe("code-review extension", () => {
     for (const payload of [
       { ...receiptPayload(), extra: 1 }, (({ unresolved, ...rest }) => rest)(receiptPayload()), receiptPayload({ verdict: "PASS" }), receiptPayload({ verdict: "unknown" }), receiptPayload({ review_thread_id: "" }), receiptPayload({ review_thread_id: "has space" }), receiptPayload({ review_thread_id: "t".repeat(129) }), receiptPayload({ review_thread_id: "-lead" }),
       receiptPayload({ reviewed_at: "2026-09-03T00:00:00" }), receiptPayload({ reviewed_at: "yesterday" }), receiptPayload({ artifact_hash: HASH_A.toUpperCase() }), receiptPayload({ artifact_hash: undefined }), receiptPayload({ review_id: "not-a-uuid" }),
-      receiptPayload({ verdict: "fail", mandatory_changes: Array.from({ length: 33 }, () => ({ location: "a", message: "b" })) }), receiptPayload({ verdict: "fail", mandatory_changes: [{ location: long, message: "b" }] }), receiptPayload({ verdict: "fail", mandatory_changes: [{ location: "a", message: "b" }] }), receiptPayload({ verdict: "fail", unresolved: [{ topic: "a", message: "b", extra: 1 }] }), receiptPayload({ verdict: "fail", unresolved: [{ topic: "a" }] }), receiptPayload({ verdict: "fail", unresolved: "none" }),
+      receiptPayload({ verdict: "fail", mandatory_changes: Array.from({ length: 33 }, () => ({ location: "a", message: "b" })) }), receiptPayload({ verdict: "fail", mandatory_changes: [{ location: long, message: "b" }] }), receiptPayload({ verdict: "fail", mandatory_changes: [{ location: "a", message: "b\u0007" }] }), receiptPayload({ verdict: "fail", unresolved: [{ topic: "a", message: "b", extra: 1 }] }), receiptPayload({ verdict: "fail", unresolved: [{ topic: "a" }] }), receiptPayload({ verdict: "fail", unresolved: "none" }),
       receiptPayload({ verdict: "fail", ...bigList("mandatory_changes", { location: "l".repeat(256), message: "m".repeat(1024) }), ...bigList("unresolved", { topic: "t".repeat(256), message: "m".repeat(1024) }) })
     ]) expect(parseReceipt(receiptContent({ payload }))).toBeNull();
     expect(parseReceipt(receiptContent().replace("v=1", "v=2"))).toBeNull(); expect(parseReceipt(receiptContent().split("\n")[0])).toBeNull(); expect(parseReceipt(`${receiptContent().split("\n")[0]}\nnot json`)).toBeNull(); expect(parseReceipt(`${receiptContent()}`.replace(fx(104), "not-a-uuid"))).toBeNull();
@@ -161,6 +162,24 @@ describe("code-review extension", () => {
     await ctx.store.append("code_review_requested", { reviewId: fx(142), round: 1, requestMessageId: fx(130), threadId: fx(103), targetAlias: "reviewer", targetKind: "design", artifactHash: HASH_A, payloadHash: "a".repeat(64), payload: {} });
     await expect(deliver(ctx, frameOf(ctx, receiptContent({ replyTo: fx(130), payload: receiptPayload({ review_id: fx(142) }) })))).rejects.toThrow("identity snapshot");
     expect(ctx.store.events.length - before).toBe(3); expect(ctx.store.events.some((event) => event.type === "code_review_receipt_accepted")).toBeFalse();
+  });
+
+  // The envelope the shipped sender writes is the envelope the shipped receiver takes apart, and
+  // the two changed together when the mode attributes came off. A wrapper that still declares a
+  // mode is a shape this build cannot check, so the payload inside it is not read at all rather
+  // than read with its header ignored.
+  test("unwraps a receipt from the envelope this package writes and refuses one that declares a mode", async () => {
+    const ctx = await make(); await ctx.review.request(ctx.args); const from = `uds:${ctx.socketPath}`;
+    const wrapped = senderEnvelope({ from, body: receiptContent() });
+    expect(wrapped.startsWith(`<cross-session-message from="${from}" from-name="${SENDER_PRODUCT_NAME}">\n`)).toBeTrue();
+    await deliver(ctx, frameOf(ctx, wrapped));
+    expect(ctx.store.events.some((event) => event.type === "code_review_receipt_accepted")).toBeTrue();
+    const settled = ctx.store.events.length;
+    for (const stranger of [
+      `<cross-session-message from="${from}" from-name="Claude MCP" from-mode="prompting">\n${receiptContent({ messageId: fx(105) })}\n</cross-session-message>`,
+      `<cross-session-message from="${from}" from-name="Claude MCP" from-mode="prompting" from-mode-verified-by="kern_procargs2">\n${receiptContent({ messageId: fx(106) })}\n</cross-session-message>`
+    ]) await deliver(ctx, frameOf(ctx, stranger, fx(701)));
+    expect(ctx.store.events.length).toBe(settled);
   });
 
   test("preserves plain P1 evidence and ignores control frames and unrelated messages", async () => {
@@ -244,7 +263,7 @@ describe("code-review extension", () => {
     const waited = await reviewFacade.handle({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta(), name: "code_review_wait", arguments: { afterSeq: 0, reviewId: fx(101) } } });
     expect(status.result.structuredContent.lastEvent).toMatchObject({ type: "code_review_receipt_accepted", verdict: "pass", artifactHash: HASH_A, reviewId: fx(101), requestMessageId: fx(102), receiptMessageId: fx(104) });
     const verdicts = waited.result.structuredContent.events.filter((event) => Object.hasOwn(event, "verdict")); expect(verdicts).toHaveLength(1); expect(verdicts[0]).toMatchObject({ type: "code_review_receipt_accepted", verdict: "pass", artifactHash: HASH_A, reviewId: fx(101), requestMessageId: fx(102) });
-    const eventSchema = toolDefinitions([], { extensions: ["code-review"] }).find((tool) => tool.name === "code_review_wait").outputSchema.anyOf[0].properties.events.items;
+    const eventSchema = toolDefinitions([], { extensions: ["code-review"] }).find((tool) => tool.name === "code_review_wait").outputSchema.properties.events.items;
     const bare = { seq: 3, type: "code_review_receipt_accepted", at: "2026-09-03T00:00:01Z", reviewId: fx(101), round: 1, requestMessageId: fx(102), receiptMessageId: fx(104), verdict: "pass" };
     expect(validateSchema(eventSchema, bare).valid).toBeFalse(); expect(validateSchema(eventSchema, { ...bare, verdict: "fail" }).valid).toBeFalse(); expect(validateSchema(eventSchema, { ...bare, artifactHash: HASH_A }).valid).toBeTrue(); expect(validateSchema(eventSchema, (({ verdict, ...rest }) => rest)(bare)).valid).toBeTrue();
     const leaking = createFacade({ tools: toolDefinitions(["reviewer"], { extensions: ["code-review"] }), callTool: async () => ({ ...ctx.review.status({ reviewId: fx(101) }), lastEvent: bare }) });
@@ -323,7 +342,7 @@ describe("code-review MCP contract", () => {
     expect(toolDefinitions([], { extensions: ["code-review"] }).map((tool) => tool.name)).toEqual([...CORE_TOOLS, ...CODE_REVIEW_TOOLS]);
     expect(toolDefinitions([], { extensions: ["code-review", "milestone"], admin: true }).map((tool) => tool.name)).toEqual([...CORE_TOOLS, ...MILESTONE_TOOLS, ...CODE_REVIEW_TOOLS, "daemon_shutdown"]);
     expect(toolDefinitions([], { requestedExtensions: ["code-review"] }).map((tool) => tool.name)).toEqual(CORE_TOOLS);
-    const daemonSchema = (options) => toolDefinitions([], options).find((tool) => tool.name === "daemon_status").outputSchema.anyOf[0];
+    const daemonSchema = (options) => toolDefinitions([], options).find((tool) => tool.name === "daemon_status").outputSchema;
     expect(daemonSchema({ extensions: ["milestone"] }).properties.enabledExtensions.items.enum).toEqual(["milestone"]); expect(daemonSchema({ requestedExtensions: ["milestone"] }).properties.enabledExtensions.items.enum).toEqual(["milestone"]);
     expect(daemonSchema({ extensions: ["code-review"], requestedExtensions: ["milestone"] }).properties.requestedExtensions.items.enum).toEqual(["code-review", "milestone"]); expect(daemonSchema({}).properties.enabledExtensions).toBeUndefined();
     expect(validateSchema(daemonSchema({ extensions: ["code-review", "milestone"] }), { running: true, pid: 4, procStart: "s", admin: false, eventSeq: 0, targetCount: 0, enabledExtensions: ["code-review", "milestone"], requestedExtensions: [], extensionMismatch: true }).valid).toBeTrue();

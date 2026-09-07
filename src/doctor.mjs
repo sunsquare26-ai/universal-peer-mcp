@@ -2,7 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { statePaths } from "./core/state-paths.mjs";
+import { resolveStateDirEnv, statePaths } from "./core/state-paths.mjs";
 import { redactPublic } from "./mcp/redact.mjs";
 
 function tilde(value) { const home = os.homedir(); return typeof value === "string" && home ? value.split(home).join("~") : value; }
@@ -35,6 +35,10 @@ export async function doctor(options = {}) {
     architectureSupported: (manifest.cpu ?? []).includes(process.arch)
   };
   const paths = options.stateRoot ? statePaths(options.stateRoot) : statePaths();
+  // Where the directory came from, in a closed vocabulary: the current variable, the old one it
+  // is still read under, the built-in default, or an argument. An install that is quietly still
+  // running on the old name is a fact about that install, and this is where it is visible.
+  const stateDirectorySource = options.stateRoot ? "argument" : resolveStateDirEnv().source;
   const state = await inspectState(paths);
   const targets = await inspectTargets(paths.targets);
   const claudeRegistry = await inspectRegistry(options.sessionsDir);
@@ -43,7 +47,7 @@ export async function doctor(options = {}) {
     && state.ok && targets.ok && claudeRegistry.ok && codexWake.ok);
   return redactPublic({
     ok, platform: process.platform, arch: process.arch, runtime: bunVersion ? `Bun ${bunVersion}` : `Node ${process.versions.node}`,
-    stateDirectory: tilde(paths.root),
+    stateDirectory: tilde(paths.root), stateDirectorySource,
     system, runtimes: runtime, state, targets, claudeRegistry, codexWake,
     note: "doctor does not print tokens or process arguments",
     writes: "none — doctor never creates the state directory or any file"
@@ -77,13 +81,16 @@ async function inspectTargets(file) {
   try { await fsp.lstat(file); }
   catch (error) {
     if (error.code !== "ENOENT") return unreadable(error, "the target file could not be inspected");
-    return { ok: true, status: "absent", present: false, count: 0, note: "copy targets.example.json into the state directory to add targets" };
+    // An absent table is a legitimate state to be installed in and an impossible one to work
+    // from, and both halves are said out loud: nothing advertises an alias and nothing that
+    // names one succeeds until this file exists.
+    return { ok: true, status: "absent", present: false, count: 0, aliases: [], note: "no target table: no alias is advertised and every call naming one is refused — copy targets.example.json into the state directory to add targets" };
   }
   try {
     const { loadTargets } = await import("./core/target-config.mjs");
     const loaded = await loadTargets(file);
     return { ok: true, status: "present", present: true, schemaValid: true, count: Object.keys(loaded).length, aliases: Object.keys(loaded) };
-  } catch (error) { return { ok: false, status: "present", present: true, schemaValid: false, count: 0, reason: reason(error) }; }
+  } catch (error) { return { ok: false, status: "present", present: true, schemaValid: false, count: 0, aliases: [], reason: reason(error) }; }
 }
 
 async function inspectRegistry(sessionsDirOverride) {

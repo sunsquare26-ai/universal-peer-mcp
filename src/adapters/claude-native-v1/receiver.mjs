@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { atomicPrivateWrite } from "../../core/state-paths.mjs";
 import { localPeerPid } from "./darwin-peerpid.mjs";
+import { SENDER_PRODUCT_NAME } from "./protocol.mjs";
 import { processIdentity, processStart } from "./darwin-procargs.mjs";
 
 export async function startReceiver(onFrame, { sessionsDir = path.join(os.homedir(), ".claude", "sessions"), socketDir = "/tmp/cc-socks", peerIdentityReader = defaultPeerIdentity, onFrameRefused = null } = {}) {
@@ -28,7 +29,11 @@ export async function startReceiver(onFrame, { sessionsDir = path.join(os.homedi
   await atomicPrivateWrite(registryPath, `${JSON.stringify({
     pid: process.pid, sessionId, cwd: process.cwd(), procStart, peerProtocol: 1,
     peerFeatures: ["notify_idle", "reply_across_default_dirs"], pidDomain: "darwin",
-    messagingSocketPath: socketPath, name: "Claude MCP", status: "idle", updatedAt: Date.now()
+    // The daemon's own name in the session registry. It used to read "Claude MCP", which is a
+    // claim about a client this process cannot see; what this row describes is this process, and
+    // the one name it can state about itself is the program's. Taken from the same constant the
+    // envelope is written with so the two cannot drift apart.
+    messagingSocketPath: socketPath, name: SENDER_PRODUCT_NAME, status: "idle", updatedAt: Date.now()
   })}\n`);
   return {
     address: `uds:${socketPath}`, sessionId,
@@ -73,7 +78,11 @@ function accept(socket, token, onFrame, { peerIdentityReader, onFrameRefused, co
   socket.on("error", () => socket.destroy());
   socket.on("data", (chunk) => {
     buffer += chunk;
-    if (Buffer.byteLength(buffer) > 1024 * 1024) return refuse("frame_too_large");
+    // The ordinal of the frame being refused, which is the next one — this runs before the loop
+    // has counted it. The default was the counter's current value, so an oversize first frame was
+    // recorded under ordinal 0, a number that names no frame; every other refusal below passes the
+    // ordinal of the frame it refused.
+    if (Buffer.byteLength(buffer) > 1024 * 1024) return refuse("frame_too_large", ordinal + 1);
     while (buffer.includes("\n")) {
       const index = buffer.indexOf("\n"); const line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
       if (!line) continue;

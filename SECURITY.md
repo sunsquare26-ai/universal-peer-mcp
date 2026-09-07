@@ -8,7 +8,7 @@ Only the most recent released tag is supported. There are no long-term support b
 
 Report privately through **GitHub Security Advisories** on this repository: open the **Security** tab, then **Report a vulnerability**. That is the only intake channel. Do not open a public issue for a suspected vulnerability, and do not include real tokens, real session UUIDs, or real paths in the report — redact them.
 
-What helps: the version or commit, `sw_vers` and `uname -m` output, `claude-peer-mcp doctor` output, and the smallest sequence of steps that reproduces the problem.
+What helps: the version or commit, `sw_vers` and `uname -m` output, `universal-peer-mcp doctor` output, and the smallest sequence of steps that reproduces the problem.
 
 What to expect: an acknowledgement within 7 days and an assessment within 30 days. This is a small project maintained by one person, and those are targets, not a contract. If a report is out of scope you will be told why rather than left waiting.
 
@@ -28,7 +28,7 @@ The `KERN_PROCARGS2` buffer layout used here was measured on 2026-09-03 on macOS
 
 ## No privilege escalation
 
-There is no command that changes a permission mode. Whatever permission mode you launched Claude Code with is the ceiling for what can be sent to it. An inbound `from_mode` field is recorded as an observation only and never raises a permission.
+There is no command that changes a permission mode. Whatever permission mode you launched Claude Code with is the ceiling for what can be sent to it. An inbound `from_mode` field never raises a permission, and this package asserts no `from_mode` of its own on the way out: it cannot prove the sending session's mode, so it does not name one (`docs/known-issues.md` §10).
 
 Admin mode is read from the daemon's own startup environment. A request, a tool argument, or a config file cannot enable it. When admin mode is off, `daemon_shutdown` is not even listed as a tool.
 

@@ -1,11 +1,12 @@
 import { publicToolError, publicToolFailure, redactPublic } from "./redact.mjs";
 import { projectSchema, validateSchema } from "./schema-validator.mjs";
+import { publicResultSchema } from "./tools.mjs";
 
 export const MODERN_VERSION = "2026-07-28";
 export const PROTOCOL_KEY = "io.modelcontextprotocol/protocolVersion";
 export const CLIENT_CAPS_KEY = "io.modelcontextprotocol/clientCapabilities";
 export const SERVER_INFO_KEY = "io.modelcontextprotocol/serverInfo";
-export const SERVER_INFO = Object.freeze({ name: "claude-peer-mcp", version: "0.1.0" });
+export const SERVER_INFO = Object.freeze({ name: "universal-peer-mcp", version: "0.1.0" });
 
 export async function handleModern(request, { tools, callTool }) {
   if (request.id === undefined) return null;
@@ -28,7 +29,8 @@ export async function handleModern(request, { tools, callTool }) {
 }
 
 function publicResult(tool, raw) {
-  const successSchema = tool.outputSchema.anyOf?.[0] ?? tool.outputSchema;
+  const successSchema = publicResultSchema(tool);
+  if (!successSchema) throw codedError("INVALID_PUBLIC_RESULT", "tool has no public result contract");
   const value = redactPublic(projectSchema(successSchema, raw));
   const checked = validateSchema(successSchema, value);
   if (!checked.valid) throw codedError("INVALID_PUBLIC_RESULT", "daemon returned an invalid public result");

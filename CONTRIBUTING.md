@@ -7,8 +7,8 @@ Small project, narrow scope. Before writing code, open an issue describing the p
 Requires macOS and Bun >= 1.3.0. There are no runtime dependencies to install; `package.json` declares none, and nothing is fetched at install time.
 
 ```sh
-git clone https://github.com/sunsquare26-ai/claude-peer-mcp.git
-cd claude-peer-mcp
+git clone https://github.com/sunsquare26-ai/universal-peer-mcp.git
+cd universal-peer-mcp
 bun --version
 ```
 
@@ -36,7 +36,7 @@ Syntax check without running anything:
 bun run check
 ```
 
-Tests must never touch your real state directory. Every test creates its own directory with `fs.mkdtemp` under the system temporary directory, `chmod 0700`s it, and passes it through `CLAUDE_PEER_MCP_STATE_DIR`. A test that writes to `~/Library/Application Support/claude-peer-mcp/` is a bug in the test.
+Tests must never touch your real state directory. Every test creates its own directory with `fs.mkdtemp` under the system temporary directory, `chmod 0700`s it, and passes it through `UNIVERSAL_PEER_MCP_STATE_DIR`. A test that writes to `~/Library/Application Support/claude-peer-mcp/` is a bug in the test.
 
 ## Fixtures: what must never appear
 
@@ -57,7 +57,7 @@ Fixtures and test data are published. They must contain nothing that came from a
 
   Beside it, and saying the same thing in a form you can diff, is the text transcript: [docs/demo-ack.md](docs/demo-ack.md), built from the same fixture and re-derived from the shipped code by `test/demo-ack.test.mjs`.
 
-  **Every other image is refused** — by extension, by file header, by embedded `data:` markup in any encoding, and by inline or url encoded vector markup, over the whole file rather than its first page. A renamed PNG is caught. If you need a second picture, draw it the same way and give it the same gate; do not add a captured one.
+  **Every other image is refused**, and not by recognising it. What may ship is a list — `.mjs`, `.md`, `.json`, `.toml`, `LICENSE`, `NOTICE`, and that one picture by name — so an unknown file type is refused for being unknown, and renaming nothing past it. Everything except the signed picture must be text: valid UTF-8 with no control byte but tab, carriage return and line feed, which no PNG, JPEG, GIF, BMP, WebP or PDF is under any name. And text may not carry a run of 128 or more base64 characters, over the whole file rather than its first page — the longest legitimate run in this tree is 103 and a SHA-256 is 64, while the picture that does ship is 39,028. That last rule reads no media type, no scheme and no markup, so how those are spelled does not change the answer. If you need a second picture, draw it the same way and give it the same gate; do not add a captured one.
 
 - **Extra strings that must never ship** — a customer name, a project code name — go in a file of your own, one per line, and you point the scan at it:
 
@@ -73,7 +73,7 @@ Fixtures and test data are published. They must contain nothing that came from a
 - No runtime dependencies. A pull request that adds one needs to justify it against the alternative of a few lines of code, and it must be declined by default.
 - Double quotes, semicolons, two-space indent. Match the surrounding density instead of reformatting a file you are editing.
 - Fail closed. On anything unexpected — a size, a NUL structure, an owner, a permission bit, an identity that changed — throw before the socket write rather than continuing with a guess.
-- Never widen a permission. Observed values such as an inbound `from_mode` are recorded, never acted on.
+- Never widen a permission. A permission mode asserted on the wire — inbound or outbound — is not a fact this package can check, so it is neither acted on nor written.
 - Keep company-specific rules, model names, and internal procedures out of the tree entirely. Those belong in caller-supplied arguments or user configuration.
 
 ## Changing the layout

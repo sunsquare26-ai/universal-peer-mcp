@@ -32,8 +32,21 @@ const DENY_PATH = [
   /(^|\/)events\.jsonl$/, /\.sock$/, /\.pid$/, /\.token$/, /\.lock$/, /\.tgz$/,
   /(^|\/)\.env/, /\.DS_Store$/, /(^|\/)state\//
 ];
-const TEXT = /\.(mjs|js|json|md|txt|toml|yml|yaml|example)$/;
-const IMAGE = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|svg|pdf)$/i;
+// What may be in the tarball is a list, not a judgement. Measured on this tree the 45 packed
+// files are 27 .mjs, 12 .md, 3 .json, 1 .toml, LICENSE and the one signed picture. Anything with
+// another extension, or with none and a name that is not on the list, fails. A deny list of
+// image extensions was the earlier shape and every renaming got past it; a rename cannot get
+// past this one, because the answer to an unknown type is no.
+const PACK_EXTENSIONS = new Set(["mjs", "md", "json", "toml"]);
+const PACK_EXTENSIONLESS = new Set(["LICENSE", "NOTICE"]);
+export function packedPathOffence(file) {
+  if (file === SIGNED_IMAGE) return null;
+  const base = file.split("/").pop();
+  const dot = base.lastIndexOf(".");
+  if (dot < 1) return PACK_EXTENSIONLESS.has(base) ? null : `${file}: no extension and not on the publish allowlist`;
+  const extension = base.slice(dot + 1).toLowerCase();
+  return PACK_EXTENSIONS.has(extension) ? null : `${file}: .${extension} is not a publishable file type`;
+}
 
 const UUID = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
 const FIXTURE_UUID = /^10000000-0000-4000-8000-[0-9a-f]{12}$/;
@@ -56,24 +69,26 @@ const HOME_NAME_ALLOWED = new Set(["example"]);
 const ZERO_WIDTH = /[\u200B\u200C\u200D\u2060\uFEFF]/;
 const BIDI = /[\u202A-\u202E\u2066-\u2069]/;
 
-// Every picture is kept out — by extension, by file header, and by embedded markup — except
-// the one signed screenshot, which is checked separately and far harder. Extension alone is not
-// a gate: a renamed PNG would still carry a menu bar, a user name and a path.
-const IMAGE_MAGIC = [
-  ["png", (bytes) => bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))],
-  ["jpeg", (bytes) => bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))],
-  ["gif", (bytes) => ["GIF87a", "GIF89a"].includes(bytes.subarray(0, 6).toString("latin1"))],
-  ["bmp", (bytes) => bytes.length >= 26 && bytes.subarray(0, 2).toString("latin1") === "BM"],
-  ["webp", (bytes) => bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP"],
-  ["tiff", (bytes) => ["II*\u0000", "MM\u0000*"].includes(bytes.subarray(0, 4).toString("latin1"))],
-  ["heif", (bytes) => bytes.subarray(4, 8).toString("latin1") === "ftyp" && ["heic", "heix", "mif1", "avif"].includes(bytes.subarray(8, 12).toString("latin1"))],
-  ["pdf", (bytes) => bytes.subarray(0, 5).toString("latin1") === "%PDF-"]
-];
-// base64 is not the only encoding a data uri has, and a vector image does not need a data uri
-// at all, so the shapes are matched separately and none of them assumes base64.
-const EMBEDDED_IMAGE = /data:image\/[a-z0-9.+-]*\s*[;,]/i;
-const INLINE_SVG = /<\s*svg[\s/>]/i;
-const ENCODED_SVG = /%3c\s*svg/i;
+// Every picture is kept out except the one signed screenshot, which is checked separately and
+// far harder. The rule is not a list of the shapes a picture can be written in — that list was
+// wrong five times running, once per encoding — but two facts about what we ship:
+//
+//   a file that is not text is not a file that ships, and
+//   text does not carry a block of encoded bytes long enough to be a picture.
+//
+// Neither reads a media type, a scheme or a markup tag, so how any of those is spelled stops
+// being the argument. OPAQUE_RUN is measured, not guessed: the longest run of base64 characters
+// anywhere in this tree today is 103 (a URI inside the vendored MCP schema) and a SHA-256 is 64,
+// while a 1 KiB picture is 1,366 characters and the screenshot that does ship is 39,028. The
+// bound sits between them, closer to the noise than to the payload.
+const CONTROL_BYTE = new RegExp("[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]");
+const OPAQUE_RUN = /[A-Za-z0-9+/]{128}/;
+// Two literal shapes are still named, and only two, for what a size rule cannot reach: a payload
+// too small to carry anything. They are matched on the raw text and nothing is decoded for them,
+// because a picture that has to stay under 128 characters is not a leak — the size rule is what
+// stands behind these, not the other way round.
+const BASE64_URI = new RegExp(`;bas${"e"}64,`, "i");   // assembled: a scanner must not carry what it bans
+const SVG_TAG = /(?:<|&lt;|%3c)\s*svg/i;
 
 // A character reference is not decoration. A browser and a markdown renderer both resolve a
 // numeric reference to the letter it names, so one reference dropped into the middle of a data
@@ -120,30 +135,23 @@ function codePoint(value) {
 }
 function readings(raw) { const decoded = decodeReferences(raw); return decoded === raw ? [raw] : [raw, decoded]; }
 
-// A url parser removes ascii tab, line feed and carriage return from a url before it resolves
-// it, so a data uri split by any of them is one data uri to a browser and to a markdown
-// renderer while the raw bytes match nothing. The image shapes are matched over that reading as
-// well. Only the image shapes: the same removal across a whole document would join lines that
-// have nothing to do with each other and invent leaks that are not there.
-const URL_WHITESPACE = /[\t\n\r]/g;
-function urlReadings(raw) { return [...new Set(readings(raw).flatMap((body) => [body, body.replace(URL_WHITESPACE, "")]))]; }
 
 // The whole file, not the first page of it. A picture appended to a long document is still a
 // picture, and 64 KiB into a markdown file is a comfortable place to hide one.
 export function imageOffenders(file, bytes) {
-  const offenders = [];
   if (file === SIGNED_IMAGE) {
     const digest = crypto.createHash("sha256").update(bytes).digest("hex");
     return digest === SIGNED_IMAGE_SHA256 ? [] : [`${file}: the signed screenshot is not the bytes that were signed`];
   }
-  if (IMAGE.test(file)) offenders.push(`${file}: image file extension`);
-  for (const [name, matches] of IMAGE_MAGIC) if (matches(bytes)) offenders.push(`${file}: ${name} file header`);
-  for (const body of urlReadings(bytes.toString("latin1"))) {
-    if (EMBEDDED_IMAGE.test(body)) offenders.push(`${file}: embedded image data uri`);
-    if (INLINE_SVG.test(body)) offenders.push(`${file}: inline vector image`);
-    if (ENCODED_SVG.test(body)) offenders.push(`${file}: url encoded vector image`);
-  }
-  return [...new Set(offenders)];
+  let body;
+  try { body = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { return [`${file}: not text, and the only picture that ships is ${SIGNED_IMAGE}`]; }
+  const offenders = [];
+  if (CONTROL_BYTE.test(body)) offenders.push(`${file}: control bytes in a text file`);
+  if (OPAQUE_RUN.test(body)) offenders.push(`${file}: an encoded block long enough to be a picture`);
+  if (BASE64_URI.test(body)) offenders.push(`${file}: base64 data uri`);
+  if (SVG_TAG.test(body)) offenders.push(`${file}: vector image markup`);
+  return offenders;
 }
 
 // Signed exceptions. The key is the file, the value is the SHA-256 of the exact matched
@@ -254,15 +262,18 @@ test("pack manifest carries no test, fixture, design record or .claude trace", a
   expect(offenders).toEqual([]);
 }, 60_000);
 
-test("every packed path is a regular non-symlink file with a scannable extension", async () => {
+test("every packed path is a regular non-symlink file of a type on the publish allowlist", async () => {
   const files = await packedFiles();
   const bad = [];
   for (const file of files) {
     const stat = await fsp.lstat(path.join(ROOT, file));
     if (!stat.isFile() || stat.isSymbolicLink()) bad.push(`${file}: not a regular file`);
-    if (!TEXT.test(file) && !ALLOWED_ROOT_FILES.has(file) && file !== SIGNED_IMAGE) bad.push(`${file}: unscannable file type in the tarball`);
+    const offence = packedPathOffence(file);
+    if (offence) bad.push(offence);
   }
   expect(bad).toEqual([]);
+  // and the allowlist is the whole of it: exactly one packed path is not text
+  expect(files.filter((file) => file === SIGNED_IMAGE)).toEqual([SIGNED_IMAGE]);
 }, 60_000);
 
 test("packed content leaks no home path, live identifier, secret or internal name", async () => {
@@ -379,7 +390,7 @@ test("every signed leak exception is still needed", async () => {
 
 test("pack reports a stable size and shasum", async () => {
   const report = await pack();
-  expect(report.name).toBe("claude-peer-mcp");
+  expect(report.name).toBe("universal-peer-mcp");
   expect(typeof report.shasum).toBe("string");
   expect(report.shasum).toHaveLength(40);
   expect(report.size).toBeGreaterThan(0);
@@ -399,73 +410,119 @@ test("a signed exception covers one matched string, not the rest of the file", (
 
 // Every literal here is assembled from fragments for the same reason the secret patterns are:
 // this file is scanned by the gate it defines, and a gate that flags itself gets switched off.
+//
+// The payload is a parameter, because the two rules are checked with the same eleven spellings
+// and different payloads: a real picture, which the size rule catches in every spelling, and a
+// stub too small to carry anything, which only the named shape catches. The spellings are the
+// ones that got past the earlier gate one at a time — a character reference in the media type,
+// a padded reference, a reference that expands to a blank, a literal blank — and the point of
+// the table now is that not one of them changes the answer.
+const MARK = `;bas${"e"}64,`;
+const TINY = "iVBORw0KGgoAAAANSUhEUg==";
 const PICTURE = {
-  header: () => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(24)]),
-  base64Uri: () => `![shot](${["data:image", "png;base64,iVBORw0KGgoAAAANSUhEUg=="].join("/")})`,
-  svgTag: () => `<${"svg"} xmlns="http://www.w3.org/2000/svg"></${"svg"}>`,
-  encodedUri: () => `![shot](${["data:image", `svg+xml,${"%3"}Csvg%20width%3D%228%22%3E${"%3"}C/svg%3E`].join("/")})`,
-  // The same three pictures written the way a renderer reads them and a byte scan does not.
-  decimalReference: () => `<${"img"} src="${["data:", "&#105;", "mage/png;base64,iVBORw0KGgoAAAANSUhEUg=="].join("")}">`,
-  hexReference: () => `![shot](${["data:", "&#x69;", "mage/gif;base64,R0lGODlhAQABAAAAACw="].join("")})`,
-  namedReference: () => `${"&lt;"}${"svg"} xmlns="x"${"&gt;"}${"&lt;"}/${"svg"}${"&gt;"}`,
-  doubleEncoded: () => `${["&amp;", "#105;"].join("")}mage/png;base64,iVBORw0KGgo=`,
-  // The same picture again, past the two things a one pass decoder still got wrong. A character
-  // reference has no length limit, so leading zeros walk a digit counter off the end of what it
-  // will look at; and a url parser removes ascii tab and newline before it resolves, so a
-  // reference that expands to either of those splits the scheme for a byte scan and for nobody
-  // else. Assembled from fragments for the same reason as the rest of this table.
-  paddedDecimalReference: () => `<${"img"} src="${["data:", "&#00000105;", "mage/png;base64,iVBORw0KGgoAAAANSUhEUg=="].join("")}">`,
-  paddedHexReference: () => `![shot](${["data:", "&#x00000069;", "mage/png;base64,iVBORw0KGgoAAAANSUhEUg=="].join("")})`,
-  tabbedReference: () => `<${"img"} src="${["data:im", "&Tab;", "age/png;base64,iVBORw0KGgoAAAANSUhEUg=="].join("")}">`,
-  newlineReference: () => `![shot](${["data:im", "&#10;", "age/png;base64,iVBORw0KGgoAAAANSUhEUg=="].join("")})`
+  plainUri: (b) => `![shot](${["data:image", `png${MARK}${b}`].join("/")})`,
+  decimalReference: (b) => `<${"img"} src="${["data:", "&#105;", `mage/png${MARK}${b}`].join("")}">`,
+  hexReference: (b) => `![shot](${["data:", "&#x69;", `mage/png${MARK}${b}`].join("")})`,
+  paddedDecimalReference: (b) => `<${"img"} src="${["data:", "&#00000105;", `mage/png${MARK}${b}`].join("")}">`,
+  paddedHexReference: (b) => `![shot](${["data:", "&#x00000069;", `mage/png${MARK}${b}`].join("")})`,
+  tabbedReference: (b) => `<${"img"} src="${["data:im", "&Tab;", `age/png${MARK}${b}`].join("")}">`,
+  newlineReference: (b) => `![shot](${["data:im", "&#10;", `age/png${MARK}${b}`].join("")})`,
+  spacedMime: (b) => `<${"img"} src="${["data:", ` image/png${MARK}${b}`].join("")}">`,
+  tabbedMime: (b) => `![shot](${["data:", `\timage/png${MARK}${b}`].join("")})`,
+  newlineMime: (b) => `<${"img"} src="${["data:", `\n  image/png${MARK}${b}`].join("")}">`,
+  unicodeSpacedMime: (b) => `<${"img"} src="${["data:", `\u00a0\u2003image/png${MARK}${b}`].join("")}">`
+};
+const SPELLINGS = Object.keys(PICTURE);
+const VECTOR = {
+  tag: () => `<${"sv"}${"g"} xmlns="x"></${"sv"}${"g"}>`,
+  named: () => `${"&lt;"}${"sv"}${"g"} xmlns="x"${"&gt;"}`,
+  encoded: () => `![shot](${["data:image", `${"sv"}${"g"}+xml,${"%3"}C${"sv"}${"g"}%20width%3D%228%22%3E`].join("/")})`
+};
+// A file that is not text, under a name that says nothing. Only the first bytes are spelled out;
+// what makes each one fail is that it is not UTF-8, not that the gate knows the format.
+const BINARY = {
+  png: () => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(24)]),
+  jpeg: () => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(24)]),
+  gif: () => Buffer.concat([Buffer.from("GIF89a", "latin1"), Buffer.from([0x01, 0x00, 0x01, 0x00, 0x80, 0xff, 0x00])]),
+  bmp: () => Buffer.concat([Buffer.from("BM", "latin1"), Buffer.from([0x36, 0x00, 0x00, 0x00]), Buffer.alloc(24)]),
+  webp: () => Buffer.concat([Buffer.from("RIFF", "latin1"), Buffer.from([0x1a, 0x00, 0x00, 0x00]), Buffer.from("WEBPVP8 ", "latin1"), Buffer.alloc(8)]),
+  pdf: () => Buffer.concat([Buffer.from("%PDF-1.4\n", "latin1"), Buffer.from([0x00, 0x01, 0x02]), Buffer.alloc(16)])
 };
 const FAR_IN = "filler line, and nothing to see\n".repeat(4096);   // ~128 KiB before the payload
 
-test("the image gate looks at bytes, not only at the file extension", () => {
-  expect(imageOffenders("docs/notes.txt", PICTURE.header())).not.toEqual([]);
-  expect(imageOffenders("docs/round-trip.png", Buffer.from("not a picture at all"))).not.toEqual([]);
-  expect(imageOffenders("docs/demo-ack.md", Buffer.from(PICTURE.base64Uri()))).not.toEqual([]);
-  expect(imageOffenders("docs/logo.txt", Buffer.from(PICTURE.svgTag()))).not.toEqual([]);
-  expect(imageOffenders("docs/demo-ack.md", Buffer.from("a sanitized text transcript\n"))).toEqual([]);
+// The picture that actually ships, read back as the payload a leak would carry. 29,270 bytes of
+// PNG is 39,028 base64 characters, so this is what the size rule is sized against.
+async function shippedPictureBase64() {
+  return (await fsp.readFile(path.join(ROOT, SIGNED_IMAGE))).toString("base64");
+}
+
+test("the publish allowlist, and not a list of image extensions, decides what may ship", () => {
+  for (const file of ["src/cli.mjs", "docs/architecture.md", "package.json", "targets.example.json", "examples/codex-config.toml", "LICENSE", "NOTICE", SIGNED_IMAGE]) {
+    expect(packedPathOffence(file)).toBeNull();
+  }
+  // not a deny list: an unknown type is refused because it is unknown, not because it is named
+  for (const file of ["docs/logo.png", "docs/logo.svg", "docs/manual.pdf", "docs/shot.jpeg", "docs/shot.heic", "src/native.node", "src/blob.bin", "install.sh", "Makefile", "docs/notes.txt", "docs/data.yml"]) {
+    expect(packedPathOffence(file)).toContain(file);
+  }
 });
 
-// The three ways the gate was got past.
-test("the image gate reads past the first 64 KiB and past base64", () => {
+test("a file that is not text does not ship, whatever it is named", async () => {
+  for (const [format, make] of Object.entries(BINARY)) {
+    const file = `docs/${format}-notes.md`;
+    // one answer, and which of the two it is depends only on whether the bytes happen to decode:
+    // a header of printable bytes followed by binary is text that carries control bytes, and a
+    // header that is not valid UTF-8 does not decode at all. Neither answer knows the format.
+    const answer = imageOffenders(file, make());
+    expect(answer).toHaveLength(1);
+    expect([`${file}: not text, and the only picture that ships is ${SIGNED_IMAGE}`, `${file}: control bytes in a text file`]).toContain(answer[0]);
+  }
+  // the signed picture is signed for its path as well: the same bytes anywhere else are binary
+  const shipped = await fsp.readFile(path.join(ROOT, SIGNED_IMAGE));
+  expect(imageOffenders("docs/other.md", shipped)).not.toEqual([]);
+  // and a text file that carries a control byte is not the text it claims to be either
+  expect(imageOffenders("docs/notes.md", Buffer.from(`a line${String.fromCharCode(0)}and another\n`))).toEqual(["docs/notes.md: control bytes in a text file"]);
+});
+
+// Eleven spellings, one answer. None of them is read: the payload is what fails, and the payload
+// is the same picture whichever way the markup around it is written.
+test("an encoded picture is caught by its size, in every spelling of the markup", async () => {
+  const payload = await shippedPictureBase64();
+  expect(Buffer.from(payload, "base64").equals(await fsp.readFile(path.join(ROOT, SIGNED_IMAGE)))).toBe(true);
+  expect(payload.length).toBeGreaterThan(1024);
+  for (const spelling of SPELLINGS) {
+    expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE[spelling](payload)}\n`))).toContain("docs/short.md: an encoded block long enough to be a picture");
+    expect(imageOffenders("docs/long.md", Buffer.from(`${FAR_IN}${PICTURE[spelling](payload)}\n`))).toContain("docs/long.md: an encoded block long enough to be a picture");
+  }
   expect(Buffer.byteLength(FAR_IN)).toBeGreaterThan(64 * 1024);
-  expect(imageOffenders("docs/long.md", Buffer.from(`${FAR_IN}${PICTURE.base64Uri()}\n`))).toEqual(["docs/long.md: embedded image data uri"]);
-  expect(imageOffenders("docs/long.md", Buffer.from(`${FAR_IN}${PICTURE.svgTag()}\n`))).toEqual(["docs/long.md: inline vector image"]);
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.encodedUri()}\n`))).toEqual([
-    "docs/short.md: embedded image data uri", "docs/short.md: url encoded vector image"
-  ]);
-  // and the gate still says nothing about text that only talks about pictures
-  expect(imageOffenders("docs/notes.md", Buffer.from(`${FAR_IN}no picture ships with this page\n`))).toEqual([]);
+  // and a payload with no markup around it at all is still a payload
+  expect(imageOffenders("docs/short.md", Buffer.from(`${payload}\n`))).toEqual(["docs/short.md: an encoded block long enough to be a picture"]);
 });
 
-// The fourth way past it: a character reference is not decoration. A browser and a markdown
-// renderer both resolve &#105; to "i", so the tag is an image by the time anyone sees it while
-// the raw bytes say nothing that matches. Decoding is one pass, the way a parser does it, so
-// text that renders as "&#105;" is still not a picture.
-test("the image gate resolves html character references before it looks", () => {
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.decimalReference()}\n`))).toEqual(["docs/short.md: embedded image data uri"]);
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.hexReference()}\n`))).toEqual(["docs/short.md: embedded image data uri"]);
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.namedReference()}\n`))).toEqual(["docs/short.md: inline vector image"]);
-  expect(imageOffenders("docs/long.md", Buffer.from(`${FAR_IN}${PICTURE.decimalReference()}\n`))).toEqual(["docs/long.md: embedded image data uri"]);
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.doubleEncoded()}\n`))).toEqual([]);
-  expect(imageOffenders("docs/notes.md", Buffer.from("a page that mentions R&D and A&B and nothing else\n"))).toEqual([]);
+test("a payload too small for the size rule is still refused by its markup", () => {
+  for (const spelling of SPELLINGS) {
+    expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE[spelling](TINY)}\n`))).toEqual(["docs/short.md: base64 data uri"]);
+  }
+  for (const shape of Object.values(VECTOR)) {
+    expect(imageOffenders("docs/short.md", Buffer.from(`${shape()}\n`))).toContain("docs/short.md: vector image markup");
+  }
 });
 
-// The fifth and sixth ways past it, found by re reading the decoder rather than the pictures: a
-// digit limit that a padded reference walks off, and a url whose own whitespace is not the
-// document's. Both end at the same bytes a browser renders.
-test("the image gate reads a padded character reference and a url split by its own whitespace", () => {
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.paddedDecimalReference()}\n`))).toEqual(["docs/short.md: embedded image data uri"]);
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.paddedHexReference()}\n`))).toEqual(["docs/short.md: embedded image data uri"]);
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.tabbedReference()}\n`))).toEqual(["docs/short.md: embedded image data uri"]);
-  expect(imageOffenders("docs/short.md", Buffer.from(`${PICTURE.newlineReference()}\n`))).toEqual(["docs/short.md: embedded image data uri"]);
-  expect(imageOffenders("docs/long.md", Buffer.from(`${FAR_IN}${PICTURE.tabbedReference()}\n`))).toEqual(["docs/long.md: embedded image data uri"]);
-  // and a tab or a newline between ordinary words is still nothing at all
-  expect(imageOffenders("docs/notes.md", Buffer.from("a page\twith a tab\nand a newline and no picture\n"))).toEqual([]);
-});
+test("the gate says nothing about the text this package actually ships", async () => {
+  const clean = [
+    "a sanitized text transcript\n",
+    `${FAR_IN}no picture ships with this page\n`,
+    "a page that mentions R&D and A&B and nothing else\n",
+    "a page\twith a tab\nand a newline and no picture\n",
+    "the frame carried no data: the ledger carried the reason\n",
+    "a report shaped like data: { requested: 1 } and nothing else\n",
+    `the signed picture is pinned at ${SIGNED_IMAGE_SHA256}\n`
+  ];
+  for (const body of clean) expect(imageOffenders("docs/notes.md", Buffer.from(body))).toEqual([]);
+  // the real files, including the vendored schema that talks about pictures at length
+  const offenders = [];
+  for (const file of committedFiles()) offenders.push(...imageOffenders(file, await fsp.readFile(path.join(ROOT, file))));
+  expect(offenders).toEqual([]);
+}, 60_000);
 
 test("the signed screenshot is signed for its content, not only for its name", async () => {
   const shipped = await fsp.readFile(path.join(ROOT, SIGNED_IMAGE));

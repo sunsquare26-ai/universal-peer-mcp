@@ -3,10 +3,58 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export function statePaths(root = process.env.CLAUDE_PEER_MCP_STATE_DIR) {
-  // An empty value is an unset value, not an override: `??` would resolve "" to the process
-  // working directory and put state, and a 0700 chmod, inside whatever folder the caller is in.
-  const absolute = path.resolve(root || path.join(os.homedir(), "Library", "Application Support", "claude-peer-mcp"));
+export const STATE_DIR_ENV = "UNIVERSAL_PEER_MCP_STATE_DIR";
+// The name this variable had before the package was renamed. It is still read, and it has to be:
+// the installs that carry it are configuration files on other machines, and a variable that
+// stops being read does not fail loudly. The process comes up on the default directory, finds no
+// target table there, advertises no alias and answers `daemon_status` exactly as a clean install
+// does — the whole installation looks healthy and is pointed somewhere else. Reading the old name
+// is the entire compatibility: nothing else in this package answers to it.
+export const LEGACY_STATE_DIR_ENV = "CLAUDE_PEER_MCP_STATE_DIR";
+export const LEGACY_STATE_DIR_WARNING = `${LEGACY_STATE_DIR_ENV} is the old name of ${STATE_DIR_ENV}; it is still read, and will stop being read in a later version — rename it where your MCP client sets it`;
+
+// The default directory keeps the old package's name, deliberately. A variable can be read under
+// two names at once; a directory cannot be in two places at once. Moving this one would leave an
+// existing append-only ledger where nothing looks for it while the new location comes up looking
+// exactly like a fresh install — the same silent miss the variable above is read to prevent, with
+// no second name to catch it. Renaming it is a separate change with a migration attached.
+const DEFAULT_ROOT = path.join(os.homedir(), "Library", "Application Support", "claude-peer-mcp");
+
+// An empty value is an unset value, not an override: `??` would resolve "" to the process
+// working directory and put state, and a 0700 chmod, inside whatever folder the caller is in.
+function configured(value) { return typeof value === "string" && value !== "" ? value : null; }
+
+// Which name the state directory was read from, and only that: it reads no file and writes
+// nothing, so `doctor` can ask the same question the daemon asked without answering it twice.
+export function resolveStateDirEnv(environment = process.env) {
+  const current = configured(environment[STATE_DIR_ENV]);
+  const legacy = configured(environment[LEGACY_STATE_DIR_ENV]);
+  // Two names for one directory is nothing to report. Two names for two directories is not a
+  // choice to make quietly: whichever this process picked, the rest of the installation is on the
+  // one it did not pick, and a ledger that ends up split across two directories cannot be put
+  // back together afterwards. Comparison is on the resolved path, because that is the value that
+  // decides where the state actually lands.
+  if (current !== null && legacy !== null && path.resolve(current) !== path.resolve(legacy)) {
+    throw new Error(`${STATE_DIR_ENV} and ${LEGACY_STATE_DIR_ENV} name two different state directories; unset ${LEGACY_STATE_DIR_ENV}`);
+  }
+  if (current !== null) return { root: current, source: STATE_DIR_ENV, deprecated: false, warning: null };
+  if (legacy !== null) return { root: legacy, source: LEGACY_STATE_DIR_ENV, deprecated: true, warning: LEGACY_STATE_DIR_WARNING };
+  return { root: null, source: "default", deprecated: false, warning: null };
+}
+
+// Once per process. `statePaths` is called per control request, and a deprecation notice repeated
+// on every one of them is a notice nobody reads.
+let warned = false;
+function warnOnce(message) { if (warned) return; warned = true; process.stderr.write(`${message}\n`); }
+
+export function stateRootFromEnvironment(environment = process.env, warn = warnOnce) {
+  const resolution = resolveStateDirEnv(environment);
+  if (resolution.warning !== null) warn(resolution.warning);
+  return resolution.root ?? undefined;
+}
+
+export function statePaths(root = stateRootFromEnvironment()) {
+  const absolute = path.resolve(root || DEFAULT_ROOT);
   return {
     root: absolute,
     events: path.join(absolute, "events.jsonl"),

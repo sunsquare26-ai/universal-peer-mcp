@@ -1,4 +1,11 @@
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Versions 1 through 8 and the two RFC 9562 variant bits, which is every UUID a peer can put in
+// front of this. It used to stop at 5, and 7 is in use — a time-ordered id is what a modern
+// generator produces — so a peer that answered with one made the tool that would have reported
+// the answer fail its own output contract: `invalid_public_result`, for that messageId, on every
+// call, with no cursor for `peer_wait` or a `peer_send` replay to get past it. `requireUuid` in
+// src/core/limits.mjs already took 1 through 8, so the id was accepted at the door and refused on
+// the way out; the two agree now. The check itself stays: what is not a UUID is still not one.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ASSERTIONS = new Set(["$ref", "type", "const", "enum", "allOf", "anyOf", "oneOf", "not", "minLength", "maxLength", "pattern", "format", "minimum", "maximum", "minItems", "maxItems", "items", "required", "properties", "additionalProperties"]);
 const ANNOTATIONS = new Set(["$schema", "$defs", "$id", "$anchor", "title", "description", "default", "examples", "deprecated", "readOnly", "writeOnly"]);
 const FORMATS = new Set(["uuid", "byte", "uri", "uri-template", "date", "date-time", "email"]);

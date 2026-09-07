@@ -2,7 +2,7 @@
 
 ## This is an unofficial, independent project
 
-`claude-peer-mcp` is an independent open-source project. It is **not** an official Anthropic project and **not** an official OpenAI project. It is not affiliated with, endorsed by, sponsored by, or supported by Anthropic or OpenAI.
+`universal-peer-mcp` is an independent open-source project. It is **not** an official Anthropic project and **not** an official OpenAI project. It is not affiliated with, endorsed by, sponsored by, or supported by Anthropic or OpenAI.
 
 Neither company reviewed, approved, or is responsible for this software. Do not contact Anthropic or OpenAI support about it; use this repository's issue tracker, or [SECURITY.md](SECURITY.md) for a vulnerability.
 

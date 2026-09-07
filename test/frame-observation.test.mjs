@@ -170,9 +170,17 @@ test("a frame an enabled extension took is not on the uncorrelated list", async 
   expect(harnessed.milestone.status({ completionMessageId })).toMatchObject({ found: true, state: "ack_reserved" });
 }, 30_000);
 
-test("the diagnostics reach both public projections, and a reason that is not a bare word cannot", async () => {
+// What the ledger keeps and what a caller is told are not the same thing. The diagnostics are
+// the ledger's: the public event contract has no reason, no connection number and no ordinal,
+// and the façade projects a result down to that contract before it validates it. So a diagnostic
+// that would be hostile to a public contract — an ordinal of zero, a connection number written
+// as a uuid by an older receiver, a reason carrying a socket path — cannot fail a caller's
+// query, because it is never in the answer. The residual is written down in
+// docs/known-issues.md: a caller reads these by reading the ledger, not over MCP.
+test("the diagnostics stay on the ledger and reach neither public projection", async () => {
   const harnessed = await harness();
   await harnessed.write([status(crypto.randomUUID())]);
+  await harnessed.store.append("peer_frame_refused", { connectionId: crypto.randomUUID(), frameOrdinal: 0, reason: `${harnessed.socketPath} rejected by ${os.homedir()}` });
   const tools = toolDefinitions(["worker"], { admin: false });
   const call = (facade, id, params) => facade.handle({ jsonrpc: "2.0", id, method: "tools/call", params });
   const listing = () => { const value = harnessed.core.events({}); return { ...value, events: value.events.map(publicLedgerEvent) }; };
@@ -184,20 +192,26 @@ test("the diagnostics reach both public projections, and a reason that is not a 
   const legacy = await call(legacyFacade, 2, { name: "peer_list_events", arguments: {} });
 
   for (const response of [modern, legacy]) {
+    // the hostile diagnostics did not fail the query — they were not in it
     expect(response.result.isError).toBeUndefined();
-    const event = response.result.structuredContent.events.find((entry) => entry.type === "peer_frame_uncorrelated");
-    expect(event).toMatchObject({ type: "peer_frame_uncorrelated", reason: "unknown_message_status", connectionId: 1, frameOrdinal: 2 });
+    const published = response.result.structuredContent.events.filter((entry) => ["peer_frame_uncorrelated", "peer_frame_refused"].includes(entry.type));
+    expect(published.map((entry) => entry.type)).toEqual(["peer_frame_uncorrelated", "peer_frame_refused"]);
+    for (const entry of published) {
+      expect(Object.keys(entry).sort()).toEqual(["at", "seq", "type"]);
+      for (const key of ["reason", "connectionId", "frameOrdinal"]) expect(key in entry).toBe(false);
+    }
     const bytes = JSON.stringify(response);
     expect(bytes).not.toContain(harnessed.socketPath);
     expect(bytes).not.toContain(os.homedir());
     expect(bytes).not.toContain(harnessed.token);
     expect(bytes).not.toContain(".sock");
+    expect(bytes).not.toContain("unknown_message_status");
   }
 
-  // and the contract is a gate, not a hope: a reason carrying a path fails the publish rather
-  // than travelling through it
-  await harnessed.store.append("peer_frame_refused", { connectionId: 2, frameOrdinal: 1, reason: "/tmp/cc-socks/1.sock" });
-  const poisoned = await call(createFacade(options), 3, { _meta: modernMeta(), name: "peer_list_events", arguments: {} });
-  expect(poisoned.result.isError).toBe(true);
-  expect(poisoned.result.structuredContent).toEqual({ reason: "invalid_public_result" });
+  // and the ledger kept every one of them
+  const ledger = harnessed.store.events.filter((event) => ["peer_frame_uncorrelated", "peer_frame_refused"].includes(event.type));
+  expect(ledger.map((event) => event.reason)).toEqual(["unknown_message_status", `${harnessed.socketPath} rejected by ${os.homedir()}`]);
+  expect(ledger[0]).toMatchObject({ connectionId: 1, frameOrdinal: 2 });
+  expect(ledger[1].frameOrdinal).toBe(0);
+  expect(typeof ledger[1].connectionId).toBe("string");
 }, 30_000);

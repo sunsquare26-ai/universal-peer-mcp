@@ -1,6 +1,7 @@
 import { SERVER_INFO } from "./modern-2026-07-28.mjs";
 import { publicToolError, publicToolFailure, redactPublic } from "./redact.mjs";
 import { projectSchema, validateSchema } from "./schema-validator.mjs";
+import { publicResultSchema } from "./tools.mjs";
 
 export const LEGACY_VERSION = "2025-06-18";
 
@@ -22,7 +23,8 @@ export async function handleLegacy(request, { tools, callTool }) {
   } catch (cause) { const structuredContent = publicToolFailure(cause); return { jsonrpc: "2.0", id: request.id, result: { isError: true, structuredContent, content: [{ type: "text", text: publicToolError(structuredContent.reason) }] } }; }
 }
 function publicResult(tool, raw) {
-  const successSchema = tool.outputSchema.anyOf?.[0] ?? tool.outputSchema;
+  const successSchema = publicResultSchema(tool);
+  if (!successSchema) throw codedError("INVALID_PUBLIC_RESULT", "tool has no public result contract");
   const value = redactPublic(projectSchema(successSchema, raw));
   const checked = validateSchema(successSchema, value);
   if (!checked.valid) throw codedError("INVALID_PUBLIC_RESULT", "daemon returned an invalid public result");

@@ -5,7 +5,7 @@
 # the state directory; see ../docs/configuration.md.
 
 [mcp_servers.claude-peer]
-command = "claude-peer-mcp"
+command = "universal-peer-mcp"
 args = ["serve"]
 
 # After a registry release, and without a global install, straight from npm instead
@@ -13,7 +13,7 @@ args = ["serve"]
 #
 # [mcp_servers.claude-peer]
 # command = "npx"
-# args = ["-y", "claude-peer-mcp", "serve"]
+# args = ["-y", "universal-peer-mcp", "serve"]
 
 # Optional extensions are off unless named here. They are fixed when the
 # daemon starts, so stop a running daemon before changing this line:
@@ -22,4 +22,4 @@ args = ["serve"]
 
 # Equivalent one-liner:
 #
-#   codex mcp add claude-peer -- claude-peer-mcp serve
+#   codex mcp add claude-peer -- universal-peer-mcp serve

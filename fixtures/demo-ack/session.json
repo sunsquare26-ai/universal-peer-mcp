@@ -1,6 +1,6 @@
 {
   "alias": "frontend-review",
-  "senderAddress": "uds:/path/to/state/claude-peer-mcp.sock",
+  "senderAddress": "uds:/path/to/state/universal-peer-mcp.sock",
   "permissionMode": "prompting",
   "threadId": "10000000-0000-4000-8000-000000000020",
   "subscriptionId": "10000000-0000-4000-8000-000000000022",

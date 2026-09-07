@@ -1,9 +1,11 @@
 import { EventEmitter } from "node:events";
-import { milestoneSendOptions as internalSendOptions } from "../../core/peer-core.mjs";
+import { assertSnapshotRendering, milestoneSendOptions as internalSendOptions } from "../../core/peer-core.mjs";
 import { sha256 } from "../../core/dedupe.mjs";
 import { waitForEvent } from "../../core/wait.mjs";
 import { requireUuid } from "../../core/limits.mjs";
 import { redactPublic } from "../../mcp/redact.mjs";
+import { normalizeProcStart } from "../../adapters/claude-native-v1/darwin-procargs.mjs";
+import { encodeJsonAngles, unwrapEnvelope } from "../../adapters/claude-native-v1/protocol.mjs";
 
 const RECEIPT_MARKER = /^CODE_REVIEW_RECEIPT v=1 message_id=([0-9a-f-]{36}) thread_id=([0-9a-f-]{36}) reply_to=([0-9a-f-]{36})$/i;
 const HASH = /^[0-9a-f]{64}$/;
@@ -13,7 +15,7 @@ const VERDICTS = ["pass", "fail"];
 const REQUEST_ARGS = ["alias", "reviewId", "requestMessageId", "threadId", "targetKind", "artifactHash", "scope", "nonGoals", "evidence"];
 const REQUEST_KEYS = ["review_id", "target_kind", "artifact_hash", "scope", "non_goals", "evidence"];
 const RECEIPT_KEYS = ["review_id", "verdict", "review_thread_id", "rounds", "reviewed_at", "artifact_hash", "mandatory_changes", "unresolved"];
-const SNAPSHOT_KEYS = ["targetAlias", "targetSessionId", "targetCwd", "targetSocketPath", "targetPid", "targetProcStart", "targetPermissionMode", "targetPermissionVerifiedBy"];
+const SNAPSHOT_KEYS = ["targetAlias", "targetSessionId", "targetCwd", "targetSocketPath", "targetPid", "targetProcStart", "targetProcStartRendering", "targetPermissionMode", "targetPermissionVerifiedBy"];
 // Bounds chosen by this implementation: the approved design requires schema bounds but does not fix these exact values (64 rounds, 32 KiB canonical payload, 64-hex SHA-256 hashes).
 export const MAX_ROUNDS = 64;
 export const MAX_PAYLOAD_BYTES = 32 * 1024;
@@ -61,7 +63,7 @@ export class CodeReviewExtension extends EventEmitter {
       return { ...this.#view(prior), replay: true };
     }
     if (this.store.request(normalized.requestMessageId)) throw coded("MESSAGE_ID_CONFLICT", "requestMessageId is already used by another message");
-    if (!this.core.targetsList().some((target) => target.alias === normalized.alias)) throw coded("TARGET_UNAVAILABLE", `target alias is not allowlisted: ${normalized.alias}`);
+    if (!this.core.targetsList().targets.some((target) => target.alias === normalized.alias)) throw coded("TARGET_UNAVAILABLE", `target alias is not allowlisted: ${normalized.alias}`);
     const rounds = this.#rounds(normalized.reviewId); if (rounds.length >= MAX_ROUNDS) throw coded("CODE_REVIEW_ROUND_LIMIT", `a code review cannot open more than ${MAX_ROUNDS} rounds`);
     const round = await this.#append("code_review_requested", {
       reviewId: normalized.reviewId, round: rounds.length + 1, requestMessageId: normalized.requestMessageId, threadId: normalized.threadId, targetAlias: normalized.alias,
@@ -74,7 +76,7 @@ export class CodeReviewExtension extends EventEmitter {
   async #send(round) {
     const body = requestBody(round);
     const args = { alias: round.targetAlias, messageId: round.requestMessageId, threadId: round.threadId, replyTo: null, kind: "code_review_request", body };
-    const result = await this.core.send(args, internalSendOptions({ wireBody: body, afterReservation: async ({ transportMessageId, subscriptionId, targetSnapshot }) => {
+    const result = await this.core.send(args, internalSendOptions({ wireBody: requestWireBody(round), afterReservation: async ({ transportMessageId, subscriptionId, targetSnapshot }) => {
       await this.#append("code_review_request_send_reserved", { reviewId: round.reviewId, round: round.round, requestMessageId: round.requestMessageId, transportMessageId, subscriptionId, threadId: round.threadId, artifactHash: round.artifactHash, payloadHash: round.payloadHash, ...targetSnapshot });
     } }));
     if (result.replay) throw coded("MESSAGE_ID_CONFLICT", "requestMessageId is reserved by a send this code review did not record");
@@ -83,7 +85,7 @@ export class CodeReviewExtension extends EventEmitter {
 
   async #observe(frame, peer) {
     if (frame?.type === "control") return;
-    const content = unwrap(frame?.message?.content, frame?.from);
+    const content = unwrapEnvelope(frame?.message?.content, frame?.from);
     if (typeof content !== "string" || !content.startsWith("CODE_REVIEW_RECEIPT ")) return;
     const marker = parseReceipt(content); if (!marker) throw coded("INVALID_CODE_REVIEW_RECEIPT", "invalid code review receipt");
     return this.#acceptReceipt(frame, peer, marker);
@@ -103,7 +105,7 @@ export class CodeReviewExtension extends EventEmitter {
     }
     const prior = this.#receipt(marker.messageId);
     if (prior) {
-      if (prior.payloadHash === payloadHash && prior.requestMessageId === marker.replyTo) return this.#append("code_review_receipt_duplicate", { reviewId: round.reviewId, round: round.round, requestMessageId: round.requestMessageId, receiptMessageId: marker.messageId, payloadHash, transportMessageId: frame.msg_id ?? null });
+      if (prior.payloadHash === payloadHash && prior.requestMessageId === marker.replyTo) return this.#append("code_review_receipt_duplicate", { reviewId: round.reviewId, round: round.round, requestMessageId: round.requestMessageId, receiptMessageId: marker.messageId, payloadHash, ...transportId(frame) });
       await this.#append("code_review_receipt_conflict", { reviewId: round.reviewId, round: round.round, requestMessageId: round.requestMessageId, incomingReceiptMessageId: marker.messageId, existingReceiptMessageId: prior.receiptMessageId, incomingPayloadHash: payloadHash, existingPayloadHash: prior.payloadHash });
       throw coded("CODE_REVIEW_CONFLICT", "incoming receipt conflicts with a recorded receipt");
     }
@@ -115,16 +117,17 @@ export class CodeReviewExtension extends EventEmitter {
     return this.#append("code_review_receipt_accepted", {
       reviewId: round.reviewId, round: round.round, requestMessageId: round.requestMessageId, receiptMessageId: marker.messageId, threadId: round.threadId,
       receiptVerdict: marker.payload.verdict, reviewThreadId: marker.payload.review_thread_id, rounds: marker.payload.rounds, reviewedAt: marker.payload.reviewed_at, artifactHash: marker.payload.artifact_hash,
-      payloadHash, payload: marker.payload, transportMessageId: frame.msg_id ?? null, peerPid: peer.pid, peerProcStart: peer.procStart, sourceAddress: typeof frame.from === "string" ? frame.from : null
+      payloadHash, payload: marker.payload, ...transportId(frame), peerPid: peer.pid, peerProcStart: peer.procStart, sourceAddress: typeof frame.from === "string" ? frame.from : null
     });
   }
 
   #assertSnapshot(snapshot) {
     if (!snapshot.targetSessionId || !snapshot.targetCwd || !snapshot.targetSocketPath || !snapshot.targetPermissionMode || !snapshot.targetPermissionVerifiedBy) throw coded("CODE_REVIEW_INELIGIBLE", "the original request has no durable identity snapshot");
+    assertSnapshotRendering(snapshot, "CODE_REVIEW_SNAPSHOT_RENDERING_UNVERSIONED");
   }
   #assertExactIdentity(snapshot, peer, from) {
     this.#assertSnapshot(snapshot);
-    if (!peer || peer.pid !== snapshot.targetPid || peer.procStart !== snapshot.targetProcStart || from !== `uds:${snapshot.targetSocketPath}`) throw coded("CODE_REVIEW_IDENTITY_MISMATCH", "code review peer identity mismatch");
+    if (!peer || peer.pid !== snapshot.targetPid || normalizeProcStart(peer.procStart) !== normalizeProcStart(snapshot.targetProcStart) || from !== `uds:${snapshot.targetSocketPath}`) throw coded("CODE_REVIEW_IDENTITY_MISMATCH", "code review peer identity mismatch");
   }
   #ownReservation(round, request, reserved) {
     if (!request || !reserved) return false;
@@ -142,7 +145,7 @@ export class CodeReviewExtension extends EventEmitter {
   #requestView(round, events) {
     const reserved = this.#reservation(round.requestMessageId); const own = this.#ownReservation(round, this.store.request(round.requestMessageId), reserved);
     const core = own ? this.store.events.filter((event) => event.messageId === round.requestMessageId) : [];
-    const delivered = own && core.some((event) => event.type === "peer_message_status" && event.status === "delivered" && event.transportMessageId === reserved.transportMessageId && event.peerPid === reserved.targetPid && event.peerProcStart === reserved.targetProcStart && event.sourceAddress === `uds:${reserved.targetSocketPath}`);
+    const delivered = own && core.some((event) => event.type === "peer_message_status" && event.status === "delivered" && event.transportMessageId === reserved.transportMessageId && event.peerPid === reserved.targetPid && normalizeProcStart(event.peerProcStart) === normalizeProcStart(reserved.targetProcStart) && event.sourceAddress === `uds:${reserved.targetSocketPath}`);
     const delivery = core.some((event) => event.type === "peer_terminal_failure") ? "terminal" : delivered ? "delivered" : core.some((event) => event.type === "send_failed") ? "failed" : core.some((event) => event.type === "socket_write_complete") ? "written" : core.some((event) => event.type === "send_requested") ? "reserved" : "unsent";
     return { messageId: round.requestMessageId, transportMessageId: own ? reserved.transportMessageId : null, subscriptionId: own ? reserved.subscriptionId : null, delivery };
   }
@@ -164,7 +167,15 @@ export function parseReceipt(content) {
   try { const normalized = validateReceipt(payload); const canonicalPayload = canonicalJson(normalized); if (Buffer.byteLength(canonicalPayload) > MAX_PAYLOAD_BYTES) return null; return { messageId: requireUuid(match[1], "receiptMessageId"), threadId: requireUuid(match[2], "threadId"), replyTo: requireUuid(match[3], "replyTo"), payload: normalized, canonicalPayload }; } catch { return null; }
 }
 
-export function requestBody(round) { return `CODE_REVIEW_REQUEST v=1 message_id=${round.requestMessageId} thread_id=${round.threadId} review_id=${round.reviewId} round=${round.round} artifact_hash=${round.artifactHash}\n${canonicalJson(round.payload)}`; }
+// Two renderings of one request, and the difference is the last step only. `requestBody` is the
+// document this extension hashes and the one `canonicalSend` is given, so it stays byte for byte
+// what it has always been. `requestWireBody` is that document with the payload's angle brackets
+// written as JSON escapes, which is what leaves the machine: the marker line is not JSON and is
+// not touched, and the far side splits the two at the same newline before it parses (see
+// `parseReceipt`, and `encodeJsonAngles` for why the split is where the escaping belongs).
+export function requestBody(round) { return `${requestMarker(round)}\n${canonicalJson(round.payload)}`; }
+export function requestWireBody(round) { return `${requestMarker(round)}\n${encodeJsonAngles(canonicalJson(round.payload))}`; }
+function requestMarker(round) { return `CODE_REVIEW_REQUEST v=1 message_id=${round.requestMessageId} thread_id=${round.threadId} review_id=${round.reviewId} round=${round.round} artifact_hash=${round.artifactHash}`; }
 
 function validateRequestArgs(args) {
   try {
@@ -200,7 +211,14 @@ function publicReceipt(event) { return { receiptMessageId: event.receiptMessageI
 function publicCodeReviewEvent(event) { const verdict = receiptVerdictOf(event); const source = { ...event, verdict: verdict !== null && typeof event.artifactHash === "string" ? verdict : undefined }; const allowed = ["seq", "type", "at", "reviewId", "round", "requestMessageId", "receiptMessageId", "incomingReceiptMessageId", "existingReceiptMessageId", "threadId", "targetKind", "artifactHash", "incomingArtifactHash", "payloadHash", "incomingPayloadHash", "existingPayloadHash", "transportMessageId", "subscriptionId", "verdict", "reason"]; return Object.fromEntries(allowed.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])); }
 function texts(value, min, max, bytes) { if (!Array.isArray(value) || value.length < min || value.length > max) throw new Error("invalid text list"); return value.map((item) => { if (!text(item, bytes)) throw new Error("invalid text item"); return item; }); }
 function entries(value, max, keys, limits) { if (!Array.isArray(value) || value.length > max) throw new Error("invalid entry list"); return value.map((entry) => { exact(entry, keys); for (const key of keys) if (!text(entry[key], limits[key])) throw new Error(`invalid ${key}`); return Object.fromEntries(keys.map((key) => [key, entry[key]])); }); }
-function unwrap(content, from) { if (typeof content !== "string") return null; if (!content.startsWith("<cross-session-message ")) return content; const match = /^<cross-session-message from="([^"]+)" from-name="[^"]+" from-mode="(?:prompting|bypass)">\n([\s\S]+)\n<\/cross-session-message>$/.exec(content); return match && match[1] === from ? match[2] : null; }
+// The transport id of the frame a receipt arrived on, when the frame carried one. It used to be
+// written as `frame.msg_id ?? null`, and the projection this event goes through drops `undefined`
+// while passing `null` — so a frame with no `msg_id` put a null under a key the published schema
+// declares as a uuid, and `code_review_status`, `code_review_list` and `code_review_wait` all
+// failed their own output contract for that review from then on. The sibling ids on the same
+// event are declared nullable and this one is not, which is what says the null was never meant.
+// An id that is not a uuid is not one either: absent is a reading, a wrong value is not.
+function transportId(frame) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(frame?.msg_id ?? "") ? { transportMessageId: frame.msg_id } : {}; }
 function canonicalJson(value) { if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`; if (plain(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`; return JSON.stringify(value); }
 function plain(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function exact(value, keys) { if (!plain(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error("unexpected keys"); }

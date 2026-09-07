@@ -10,6 +10,8 @@ Default location:
 ~/Library/Application Support/claude-peer-mcp/
 ```
 
+The directory is named after this package's former name, `claude-peer-mcp`, and keeps it. A variable can be read under two names at once and a directory cannot be in two places at once, so moving it would leave an existing event log where nothing looks for it while the new location came up looking like a fresh install.
+
 | Path | Mode | What it is |
 |---|---|---|
 | the directory itself | `0700` | Refuses to start if it is a symlink, owned by another uid, or has any group/other bit. |
@@ -102,16 +104,17 @@ These are read from the environment of the process being started. Nothing in a r
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `CLAUDE_PEER_MCP_STATE_DIR` | daemon, stdio entry point, tests | Overrides the state directory. The same `0700`/`0600`, owner, and symlink checks apply to the new location. Setting it to an empty string is treated as not setting it, so the default is used rather than the working directory. |
+| `UNIVERSAL_PEER_MCP_STATE_DIR` | daemon, stdio entry point, tests | Overrides the state directory. The same `0700`/`0600`, owner, and symlink checks apply to the new location. Setting it to an empty string is treated as not setting it, so the default is used rather than the working directory. |
+| `CLAUDE_PEER_MCP_STATE_DIR` | the same, as the former name of the variable above | **Deprecated.** Still read, so that a configuration written before this package was renamed keeps working; a process that reads it writes one line to stderr saying so. If both names are set to the same directory, nothing is said. If both are set to **different** directories the process refuses to start rather than pick one — half the installation would be on the directory that was not picked. It will stop being read in a later version. |
 | `CLAUDE_PEER_MCP_ADMIN` | daemon only, at startup | `1` enables admin mode, which is the only way `daemon_shutdown` is exposed. Any other value, or absence, leaves it off. |
 | `CLAUDE_PEER_MCP_EXTENSIONS` | daemon and stdio entry point, at startup | Comma-separated list. Only `milestone` and `code-review` are accepted; anything else makes the daemon refuse to start with `unsupported extension`. The CLI sets this for you from `--enable`. |
 
-There are no other `CLAUDE_PEER_MCP_*` variables that the daemon or the stdio entry point reads. One more exists for the release checks only: `CLAUDE_PEER_MCP_DENY_TERMS` points `test/pack.test.mjs` at a file of extra strings that must not appear in anything this repository publishes. It is read by a test, never by the server.
+Those are all the variables the daemon and the stdio entry point read; the three still spelled `CLAUDE_PEER_MCP_*` keep that spelling for now. One more exists for the release checks only: `CLAUDE_PEER_MCP_DENY_TERMS` points `test/pack.test.mjs` at a file of extra strings that must not appear in anything this repository publishes. It is read by a test, never by the server.
 
 ## Command line
 
 ```text
-claude-peer-mcp [serve [--enable milestone] [--enable code-review] | doctor]
+universal-peer-mcp [serve [--enable milestone] [--enable code-review] | doctor]
 ```
 
 - `serve` — run the stdio MCP server. This is what your MCP client should launch. It starts the daemon on demand if one is not already running.
@@ -122,4 +125,4 @@ Extensions are off unless named. `milestone` and `code-review` add their own too
 
 ## MCP client configuration
 
-See [../examples/codex-config.toml](../examples/codex-config.toml) and [../examples/claude-mcp.json](../examples/claude-mcp.json). Both point at the installed `claude-peer-mcp` bin, or `npx -y claude-peer-mcp`, and neither contains a user-specific path. Immediately after installation there are zero targets, and the send tools stay closed until you write `targets.json` yourself.
+See [../examples/codex-config.toml](../examples/codex-config.toml) and [../examples/claude-mcp.json](../examples/claude-mcp.json). Both point at the installed `universal-peer-mcp` bin, or `npx -y universal-peer-mcp`, and neither contains a user-specific path. Immediately after installation there are zero targets, and the send tools stay closed until you write `targets.json` yourself.

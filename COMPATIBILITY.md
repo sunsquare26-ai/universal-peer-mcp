@@ -15,14 +15,14 @@ One machine, one date. Everything below was read from the running system, not co
 | Codex CLI | codex-cli 0.153.2 | `codex --version` | 2026-09-07 |
 | Claude Code | 2.1.260 | `claude --version` | 2026-09-07 |
 | Node (dev only, `bun run check`) | v25.6.0 | `node --version` | 2026-09-07 |
-| Node compatibility version Bun reports | 24.3.0 | `claude-peer-mcp doctor` -> `runtimes.node` | 2026-09-07 |
+| Node compatibility version Bun reports | 24.3.0 | `universal-peer-mcp doctor` -> `runtimes.node` | 2026-09-07 |
 | npm (packaging only) | 11.8.0 | `npm --version` | 2026-09-07 |
 
 ## Behaviour verified on that machine
 
 | Check | Result | Date |
 |---|---|---|
-| `claude-peer-mcp doctor` reports `ok: true`, `platform: darwin`, `arch: arm64` | pass | 2026-09-07 |
+| `universal-peer-mcp doctor` reports `ok: true`, `platform: darwin`, `arch: arm64` | pass | 2026-09-07 |
 | `doctor` platform, architecture, Bun-version, state, targets, Claude registry, and codex-wake checks | all pass, `codexWake.enabled: false` | 2026-09-07 |
 | Live `KERN_PROCARGS2` read through `bun:ffi` on `/usr/lib/libSystem.B.dylib` | pass — `argc` parsed, `argv[0]` equal to the exec path | 2026-09-07 |
 | `ps -p <pid> -o lstart=` returns a usable process start string | pass | 2026-09-07 |

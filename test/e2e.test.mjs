@@ -20,6 +20,7 @@ import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { SENDER_PRODUCT_NAME } from "../src/adapters/claude-native-v1/protocol.mjs";
 import { validateSchema } from "../src/mcp/schema-validator.mjs";
 import { procStartOf, signalChild, signalOwned } from "./owned-signal.mjs";
 
@@ -50,8 +51,8 @@ for (const dir of Object.values(dirs)) await fsp.mkdir(dir, { recursive: true, m
 await fsp.chmod(dirs.sessions, 0o700); await fsp.chmod(dirs.sockets, 0o700); await fsp.chmod(dirs.state, 0o700);
 const readyFile = path.join(work, "peer-ready.json");
 const hostLog = path.join(work, "peer-frames.jsonl");
-const bin = path.join(dirs.prefix, "bin", "claude-peer-mcp");
-const installed = path.join(dirs.prefix, "lib", "node_modules", "claude-peer-mcp");
+const bin = path.join(dirs.prefix, "bin", "universal-peer-mcp");
+const installed = path.join(dirs.prefix, "lib", "node_modules", "universal-peer-mcp");
 
 const baseline = { sessions: await names(REAL_SESSIONS), sockets: await names(SHARED_SOCKETS), tree: await treeHash(ROOT) };
 
@@ -94,7 +95,7 @@ test("a clean clone packs, installs into an empty prefix and starts with no user
   // packing and installing must not touch the tree they read
   expect(await treeHash(dirs.clone)).toEqual(cloneTree);
 
-  expect((await fsp.stat(path.join(dirs.prefix, "bin", "claude-peer-mcp"))).isFile() || (await fsp.lstat(bin)).isSymbolicLink()).toBeTrue();
+  expect((await fsp.stat(path.join(dirs.prefix, "bin", "universal-peer-mcp"))).isFile() || (await fsp.lstat(bin)).isSymbolicLink()).toBeTrue();
   for (const shipped of ["src/cli.mjs", "src/daemon.mjs", "src/doctor.mjs", "README.md", "LICENSE", "SECURITY.md", "targets.example.json"]) {
     expect((await fsp.stat(path.join(installed, shipped))).isFile()).toBeTrue();
   }
@@ -102,7 +103,7 @@ test("a clean clone packs, installs into an empty prefix and starts with no user
 
   // doctor writes nothing, and the state directory it names is the one the environment
   // chose, not the developer's.
-  const report = await run(bin, ["doctor"], { env: env({ CLAUDE_PEER_MCP_STATE_DIR: dirs.state }) });
+  const report = await run(bin, ["doctor"], { env: env({ UNIVERSAL_PEER_MCP_STATE_DIR: dirs.state }) });
   expect(report.code).toBe(0); expect(report.stderr).toBe("");
   const document = JSON.parse(report.stdout);
   expect(document.state).toMatchObject({ present: true });
@@ -162,7 +163,7 @@ test("modern wire: register a target, send once, and read the delivery, ACK, rep
   await stopDaemon();
 
   const session = await open();
-  expect(await session.call("peer_targets", {})).toEqual([{ alias: "review", connected: false, permissionMode: "prompting", expectedDisplayName: "Peer review", observedDisplayName: null }]);
+  expect(await session.call("peer_targets", {})).toEqual({ targets: [{ alias: "review", connected: false, permissionMode: "prompting", expectedDisplayName: "Peer review", observedDisplayName: null }] });
 
   const host = JSON.parse(await fsp.readFile(readyFile, "utf8"));
   const status = await session.call("peer_status", { alias: "review" });
@@ -202,7 +203,7 @@ test("modern wire: register a target, send once, and read the delivery, ACK, rep
 
   const frames = (await fsp.readFile(hostLog, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
   const answered = frames.find((entry) => entry.event === "answered");
-  expect(answered).toMatchObject({ messageId: fx(10), mode: "prompting", name: "Claude MCP" });
+  expect(answered).toMatchObject({ messageId: fx(10), mode: null, name: SENDER_PRODUCT_NAME });
   expect(frames.some((entry) => entry.event === "authenticated")).toBeTrue();
   await session.close();
 }, 300_000);
@@ -212,7 +213,7 @@ test("modern wire: register a target, send once, and read the delivery, ACK, rep
 test("legacy wire: the same daemon answers an initialize client with its own codec", async () => {
   const session = await open({ era: "legacy" });
   const hello = await session.send({ jsonrpc: "2.0", id: 101, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } } });
-  expect(hello.result).toEqual({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "claude-peer-mcp", version: "0.1.0" } });
+  expect(hello.result).toEqual({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "universal-peer-mcp", version: "0.1.0" } });
   session.notify({ jsonrpc: "2.0", method: "notifications/initialized" });
 
   const tools = await session.send({ jsonrpc: "2.0", id: 102, method: "tools/list", params: {} });
@@ -310,7 +311,7 @@ test("uninstall removes the package, keeps the user's state and leaves nothing b
   await stopDaemon();
   await stopHost();
 
-  const uninstall = await run("npm", npmArgs(["uninstall", "-g", "--prefix", dirs.prefix, "claude-peer-mcp"]), { cwd: work });
+  const uninstall = await run("npm", npmArgs(["uninstall", "-g", "--prefix", dirs.prefix, "universal-peer-mcp"]), { cwd: work });
   expect(uninstall.code).toBe(0);
   expect(await missing(installed)).toBeTrue();
   expect(await missing(bin)).toBeTrue();
@@ -349,7 +350,7 @@ function npmArgs(extra) {
 
 function env(extra = {}) {
   const base = { ...process.env, HOME: dirs.home };
-  for (const key of Object.keys(base)) if (key.startsWith("CLAUDE_PEER_MCP_")) delete base[key];
+  for (const key of Object.keys(base)) if (key.startsWith("UNIVERSAL_PEER_MCP_") || key.startsWith("CLAUDE_PEER_MCP_")) delete base[key];
   return { ...base, ...extra };
 }
 
@@ -367,7 +368,7 @@ async function step(name, command, args, options) {
 }
 
 function serveArgs({ enable = [] } = {}) { return ["serve", ...enable.flatMap((name) => ["--enable", name])]; }
-function serveEnv({ admin = false } = {}) { return env({ CLAUDE_PEER_MCP_STATE_DIR: dirs.state, ...(admin ? { CLAUDE_PEER_MCP_ADMIN: "1" } : {}) }); }
+function serveEnv({ admin = false } = {}) { return env({ UNIVERSAL_PEER_MCP_STATE_DIR: dirs.state, ...(admin ? { CLAUDE_PEER_MCP_ADMIN: "1" } : {}) }); }
 
 // one shot: feed the façade a whole input and keep the exact bytes it wrote back
 async function raw(input, expected, options = {}) {
@@ -433,7 +434,7 @@ async function open({ enable = [], admin = false, era = "modern" } = {}) {
   };
   if (era === "modern") {
     const info = await send({ jsonrpc: "2.0", id, method: "server/discover", params: { _meta: META } });
-    expect(info.result._meta[SERVER_INFO_KEY]).toEqual({ name: "claude-peer-mcp", version: "0.1.0" });
+    expect(info.result._meta[SERVER_INFO_KEY]).toEqual({ name: "universal-peer-mcp", version: "0.1.0" });
   }
   await noteDaemon();
   return session;

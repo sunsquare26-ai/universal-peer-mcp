@@ -6,6 +6,7 @@ import path from "node:path";
 import { EventStore } from "../src/core/events.mjs";
 import { PeerCore, milestoneSendOptions } from "../src/core/peer-core.mjs";
 import { canonicalSend, sha256 } from "../src/core/dedupe.mjs";
+import { senderEnvelope } from "../src/adapters/claude-native-v1/protocol.mjs";
 import { statePaths } from "../src/core/state-paths.mjs";
 import { MilestoneExtension, parseCompletion } from "../src/extensions/milestone/index.mjs";
 
@@ -37,6 +38,7 @@ async function recordAccepted(ctx) {
     instructionId: ctx.instructionId, threadId: ctx.threadId, payloadHash, payload: ctx.payload,
     targetAlias: request.targetAlias, targetSessionId: request.targetSessionId, targetCwd: request.targetCwd,
     targetSocketPath: request.targetSocketPath, targetPid: request.targetPid, targetProcStart: request.targetProcStart,
+    targetProcStartRendering: request.targetProcStartRendering,
     targetPermissionMode: request.targetPermissionMode, targetPermissionVerifiedBy: request.targetPermissionVerifiedBy
   });
   return event;
@@ -44,6 +46,19 @@ async function recordAccepted(ctx) {
 
 describe("milestone extension", () => {
   test("strictly parses the completion schema and instruction correlation field", async () => { const ctx = await make(); expect(parseCompletion(ctx.frame.message.content)?.payload.instruction_id).toBe(ctx.instructionId); expect(parseCompletion(ctx.frame.message.content.replace('"files"', '"extra"'))).toBeNull(); });
+
+  // Same round trip on the milestone side: what `senderEnvelope` writes is what `unwrap` takes
+  // apart, and a wrapper carrying a permission mode is not unwrapped.
+  test("unwraps a completion from the envelope this package writes and refuses one that declares a mode", async () => {
+    const ctx = await make(); const from = `uds:${ctx.socketPath}`;
+    const wrapped = { ...ctx.frame, message: { content: senderEnvelope({ from, body: ctx.frame.message.content }) } };
+    await ctx.core.acceptFrame(wrapped, ctx.peer); await ctx.milestone.observeFrame(wrapped, ctx.peer);
+    expect(ctx.store.events.some((event) => event.type === "milestone_completion_accepted")).toBeTrue();
+    const settled = ctx.store.events.length;
+    const stranger = { ...ctx.frame, msg_id: crypto.randomUUID(), message: { content: `<cross-session-message from="${from}" from-name="Claude MCP" from-mode="prompting">\n${ctx.frame.message.content}\n</cross-session-message>` } };
+    await ctx.core.acceptFrame(stranger, ctx.peer); await ctx.milestone.observeFrame(stranger, ctx.peer);
+    expect(ctx.store.events.length).toBe(settled);
+  });
 
   test("fsyncs accepted, prepared, and reserved before the ACK wire and completes only on exact delivered evidence", async () => {
     const ctx = await make(); await acceptCompletion(ctx); const types = ctx.store.events.map((event) => event.type); const accepted = types.indexOf("milestone_completion_accepted"); const prepared = types.indexOf("milestone_ack_prepared"); const reserved = types.indexOf("milestone_ack_send_reserved"); const write = types.lastIndexOf("socket_write_complete");

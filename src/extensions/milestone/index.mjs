@@ -1,9 +1,11 @@
 import { EventEmitter } from "node:events";
-import { milestoneSendOptions } from "../../core/peer-core.mjs";
+import { assertSnapshotRendering, milestoneSendOptions } from "../../core/peer-core.mjs";
 import { sha256 } from "../../core/dedupe.mjs";
 import { waitForEvent } from "../../core/wait.mjs";
 import { requireUuid } from "../../core/limits.mjs";
 import { redactPublic } from "../../mcp/redact.mjs";
+import { normalizeProcStart } from "../../adapters/claude-native-v1/darwin-procargs.mjs";
+import { unwrapEnvelope } from "../../adapters/claude-native-v1/protocol.mjs";
 
 const MARKER = /^MILESTONE_COMPLETED v=1 message_id=([0-9a-f-]{36}) thread_id=([0-9a-f-]{36}) reply_to=([0-9a-f-]{36})$/i;
 const HASH = /^[0-9a-f]{64}$/;
@@ -47,7 +49,7 @@ export class MilestoneExtension extends EventEmitter {
 
   async #observe(frame, peer) {
     if (frame?.type === "control" && frame.action === "peer_message_status") return this.#observeAckStatus(frame, peer);
-    const content = unwrap(frame?.message?.content, frame?.from);
+    const content = unwrapEnvelope(frame?.message?.content, frame?.from);
     if (typeof content !== "string" || !content.startsWith("MILESTONE_COMPLETED ")) return;
     const marker = parseCompletion(content); if (!marker) throw coded("INVALID_MILESTONE", "invalid milestone completion");
     return this.#acceptCompletion(frame, peer, marker);
@@ -73,6 +75,7 @@ export class MilestoneExtension extends EventEmitter {
       instructionId: marker.replyTo, threadId: marker.threadId, payloadHash, payload: marker.payload,
       targetAlias: request.targetAlias, targetSessionId: request.targetSessionId, targetCwd: request.targetCwd,
       targetSocketPath: request.targetSocketPath, targetPid: request.targetPid, targetProcStart: request.targetProcStart,
+      targetProcStartRendering: request.targetProcStartRendering,
       targetPermissionMode: request.targetPermissionMode, targetPermissionVerifiedBy: request.targetPermissionVerifiedBy
     });
     const prepared = await this.#append("milestone_ack_prepared", { completionMessageId: marker.messageId, attemptId: accepted.attemptId, ackMessageId: deterministicUuid(marker.messageId), threadId: marker.threadId, payloadHash });
@@ -91,6 +94,15 @@ export class MilestoneExtension extends EventEmitter {
   async #recover(completionMessageId, payloadHash) {
     requireUuid(completionMessageId, "completionMessageId"); if (!HASH.test(payloadHash)) throw coded("MILESTONE_IDENTITY_MISMATCH", "invalid milestone payload hash");
     const completion = this.#completion(completionMessageId); if (!completion || completion.payloadHash !== payloadHash) throw coded("MILESTONE_IDENTITY_MISMATCH", "milestone recovery identity mismatch");
+    // A recovery arrives with no alias in it, so the allowlist check that stands in front of
+    // every call that names one stands in front of nothing here. The alias it is aimed at is on
+    // the completion, recorded when that completion arrived, and a binding recorded then is not a
+    // licence to reach a target the operator has since taken off the table — the recording is
+    // evidence about the past, and the allowlist is a decision about now. So the table is asked,
+    // and it is asked before anything is appended: a recovery that will not be sent leaves no
+    // prepared ACK behind it, and the completion stays exactly as recoverable as it was for
+    // whenever the operator puts the target back.
+    this.core.assertTarget(completion.targetAlias);
     await this.#reconcileDelivered(completion);
     const view = this.#view(completion); if (view.complete) return { ...view, alreadyDelivered: true }; if (view.state === "terminal") throw coded("MILESTONE_RECOVERY_FORBIDDEN", "terminal milestone ACK cannot be recovered");
     let prepared = this.#events(completionMessageId).find((event) => event.type === "milestone_ack_prepared");
@@ -107,7 +119,7 @@ export class MilestoneExtension extends EventEmitter {
     for (const reserved of milestoneEvents.filter((event) => event.type === "milestone_ack_send_reserved")) {
       const delivered = this.store.events.find((event) => event.type === "peer_message_status"
         && event.messageId === reserved.ackMessageId && event.transportMessageId === reserved.ackTransportMessageId
-        && event.status === "delivered" && event.peerPid === reserved.targetPid && event.peerProcStart === reserved.targetProcStart
+        && event.status === "delivered" && event.peerPid === reserved.targetPid && normalizeProcStart(event.peerProcStart) === normalizeProcStart(reserved.targetProcStart)
         && event.sourceAddress === `uds:${reserved.targetSocketPath}`);
       if (delivered) {
         await this.#append("milestone_ack_delivered", { completionMessageId: completion.completionMessageId, attemptId: completion.attemptId, ackMessageId: reserved.ackMessageId, ackTransportMessageId: reserved.ackTransportMessageId, ackSubscriptionId: reserved.ackSubscriptionId, evidence: "message_status" });
@@ -128,7 +140,8 @@ export class MilestoneExtension extends EventEmitter {
 
   #assertExactIdentity(snapshot, peer, from) {
     if (!snapshot.targetSessionId || !snapshot.targetCwd || !snapshot.targetSocketPath || !snapshot.targetPermissionMode || !snapshot.targetPermissionVerifiedBy) throw coded("MILESTONE_INELIGIBLE", "the original instruction has no durable identity snapshot");
-    if (!peer || peer.pid !== snapshot.targetPid || peer.procStart !== snapshot.targetProcStart || from !== `uds:${snapshot.targetSocketPath}`) throw coded("MILESTONE_IDENTITY_MISMATCH", "milestone peer identity mismatch");
+    assertSnapshotRendering(snapshot, "MILESTONE_SNAPSHOT_RENDERING_UNVERSIONED");
+    if (!peer || peer.pid !== snapshot.targetPid || normalizeProcStart(peer.procStart) !== normalizeProcStart(snapshot.targetProcStart) || from !== `uds:${snapshot.targetSocketPath}`) throw coded("MILESTONE_IDENTITY_MISMATCH", "milestone peer identity mismatch");
   }
 
   #view(completion) {
@@ -167,7 +180,6 @@ function publicCompletion(event) { return { completionMessageId: event.completio
 function publicMilestoneEvent(event) { const allowed = ["seq", "type", "at", "completionMessageId", "incomingCompletionMessageId", "attemptId", "incomingAttemptId", "milestoneId", "instructionId", "threadId", "payloadHash", "ackMessageId", "ackTransportMessageId", "ackSubscriptionId", "reason", "status", "evidence"]; return Object.fromEntries(allowed.filter((key) => event[key] !== undefined).map((key) => [key, event[key]])); }
 function ackBody(messageId, threadId, replyTo, payloadHash) { return `MILESTONE_ACK v=1 message_id=${messageId} thread_id=${threadId} reply_to=${replyTo} payload_hash=${payloadHash}`; }
 function deterministicUuid(value) { const hex = sha256(`milestone-ack:${value}`).slice(0, 32).split(""); hex[12] = "4"; hex[16] = ["8", "9", "a", "b"][parseInt(hex[16], 16) % 4]; return `${hex.slice(0, 8).join("")}-${hex.slice(8, 12).join("")}-${hex.slice(12, 16).join("")}-${hex.slice(16, 20).join("")}-${hex.slice(20).join("")}`; }
-function unwrap(content, from) { if (typeof content !== "string") return null; if (!content.startsWith("<cross-session-message ")) return content; const match = /^<cross-session-message from="([^"]+)" from-name="[^"]+" from-mode="(?:prompting|bypass)">\n([\s\S]+)\n<\/cross-session-message>$/.exec(content); return match && match[1] === from ? match[2] : null; }
 function canonicalJson(value) { if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`; if (plain(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`; return JSON.stringify(value); }
 function plain(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function exact(value, keys) { if (!plain(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error("unexpected keys"); }
