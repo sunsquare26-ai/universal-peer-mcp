@@ -154,3 +154,32 @@ Integration tests feed real `EventStore` records through the bridge and actual
 correlation, duplicate events, restart, unavailable listeners, lost acknowledgement,
 crash reservation, privacy, and first-enable cursors. Real model turns remain
 unverified and no paid model calls were made.
+
+## Local installation and host recheck (2026-09-21)
+
+Commit `ba6d65d` was packed and installed into a separate, versioned prefix:
+`~/.local/share/universal-peer-mcp/releases/ba6d65d/runtime/`.
+The archive and `installation.json` alongside that prefix identify the exact
+artifact; its SHA-256 is
+`5aedfd5eb433c8097ad1966c5a61c004469c815e43d440b06824372d620e38e5`.
+The installed modules import successfully. The **installed** transport was then
+checked against the actual ChatGPT-bundled Codex binary, version
+`0.155.0-alpha.9.2`, using a separate temporary app-server: initialize and
+thread/loaded/list succeeded with 0 loaded threads and 0 model calls. That test
+server was stopped. This is package/transport validation, not wake validation of
+the running ChatGPT application.
+
+The existing `0.1.0-r1` installation contains independent changes across 28 source
+files, including rebind, spool, and wait/diagnostic fixes. It was not overwritten
+by this older-baseline package. The new prefix is installed but **not activated**
+in the existing MCP connection; its configuration and daemon were preserved.
+
+The current application's generated protocol contains 166 client methods,
+including turn/start and turn/steer, but no method for adding a listener to a
+running stdio server. No host MCP tool for external turn dispatch was available.
+The actual process has no inbound app-server listener. Remote-control methods in
+the schema still require a connection to the host and are not an independently
+reachable local wake endpoint. No verified configuration was found that changes
+this without replacing the host's startup integration. Consequently activation
+for this running ChatGPT thread remains blocked by the host integration, rather
+than by a missing peer transport implementation.
