@@ -159,5 +159,5 @@ function publicSendArgs(args) {
   }
   return args;
 }
-function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); if (names.some((name) => !["code-review", "milestone"].includes(name))) throw new Error("unsupported extension"); return names; }
+function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter((item) => item && item !== "codex-wake"))].sort(); if (names.some((name) => !["code-review", "milestone"].includes(name))) throw new Error("unsupported extension"); return names; }
 process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown);

@@ -137,9 +137,9 @@ async function inspectRegistry(sessionsDirOverride) {
 
 async function inspectCodexWake() {
   try {
-    const { codexWakeExtension } = await import("./extensions/codex-wake/index.mjs");
-    return codexWakeExtension.enabled
-      ? { ok: true, enabled: true, helpChecked: false, note: "codex wake help compatibility is checked by the extension when it ships" }
-      : { ok: true, enabled: false, helpChecked: false, note: "codex wake is off — no codex CLI is invoked" };
+    const enabled = (process.env.CLAUDE_PEER_MCP_EXTENSIONS ?? "").split(",").map((s) => s.trim()).includes("codex-wake");
+    return { ok: true, enabled, helpChecked: false, note: enabled
+      ? "codex wake uses allowlisted existing app-server sockets; codex_status checks live availability without running a model"
+      : "codex wake is off — enable codex-wake and configure codex-targets.json for an existing app-server listener" };
   } catch (error) { return { ok: false, enabled: false, reason: reason(error) }; }
 }
