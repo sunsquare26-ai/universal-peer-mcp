@@ -34,7 +34,7 @@
   "scripts": {
     "test": "bun test test/*.test.mjs",
     "check": "node --check src/cli.mjs && node --check src/server.mjs && node --check src/daemon.mjs",
-    "build": "bun build src/cli.mjs --target=bun --outdir=dist && cp src/extensions/codex-wake/transport.mjs dist/transport.mjs && cp src/extensions/codex-wake/transport.mjs dist/transport.mjs"
+    "build": "bun build src/cli.mjs --target=bun --outdir=dist && cp src/extensions/codex-wake/transport.mjs dist/transport.mjs"
   },
   "dependencies": {
     "ws": "8.21.3"
