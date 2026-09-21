@@ -314,3 +314,7 @@ Anthropic, Claude, OpenAI, and Codex are trademarks of their respective owners. 
 An opt-in existing-thread adapter is available with `serve --enable codex-wake`.
 It requires the receiving host to expose an app-server socket; it cannot wake
 a stdio-only ChatGPT app process. See [configuration and verified limits](docs/codex-wake.md).
+
+Automatic verified reply/completion notifications are available separately with
+`serve --enable codex-wake-bridge` and an explicit peer-to-Codex routing file.
+They remain off by default; the same existing-host listener requirement applies.

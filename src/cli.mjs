@@ -2,9 +2,9 @@
 const command = process.argv[2] ?? "serve";
 if (command === "serve") {
   const args = process.argv.slice(3); const enabled = [];
-  for (let index = 0; index < args.length; index += 1) { if (args[index] !== "--enable" || !["milestone", "code-review", "codex-wake"].includes(args[index + 1])) { process.stderr.write("usage: universal-peer-mcp serve [--enable milestone] [--enable code-review] [--enable codex-wake]\n"); process.exit(2); } enabled.push(args[index + 1]); index += 1; }
+  for (let index = 0; index < args.length; index += 1) { if (args[index] !== "--enable" || !["milestone", "code-review", "codex-wake", "codex-wake-bridge"].includes(args[index + 1])) { process.stderr.write("usage: universal-peer-mcp serve [--enable milestone] [--enable code-review] [--enable codex-wake] [--enable codex-wake-bridge]\n"); process.exit(2); } enabled.push(args[index + 1]); index += 1; }
   if (enabled.length) process.env.CLAUDE_PEER_MCP_EXTENSIONS = [...new Set(enabled)].sort().join(",");
   await import("./server.mjs");
 }
 else if (command === "doctor") { const { doctor } = await import("./doctor.mjs"); process.stdout.write(`${JSON.stringify(await doctor(), null, 2)}\n`); }
-else { process.stderr.write("usage: universal-peer-mcp [serve [--enable milestone] [--enable code-review] [--enable codex-wake]|doctor]\n"); process.exitCode = 2; }
+else { process.stderr.write("usage: universal-peer-mcp [serve [--enable milestone] [--enable code-review] [--enable codex-wake] [--enable codex-wake-bridge]|doctor]\n"); process.exitCode = 2; }

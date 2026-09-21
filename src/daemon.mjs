@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { CodexWakeBridge, loadBridgeConfig } from "./extensions/codex-wake/bridge.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -48,14 +49,22 @@ catch (error) { if (error.code !== "ENOENT" || error.path !== paths.targets) thr
 // against is the table this process would send that call with.
 const targetsDigest = targetTableDigest(targets);
 const store = new EventStore(paths); await store.init();
-let core; let milestone = null; let codeReview = null;
+let core; let milestone = null; let codeReview = null; let codexBridge = null;
+if (enabledExtensions.includes("codex-wake-bridge")) {
+  const config = await loadBridgeConfig(paths.root);
+  if (config.routes.some(route => !Object.hasOwn(targets, route.peerAlias))) throw new Error("codex bridge peer alias is not allowlisted");
+  codexBridge = new CodexWakeBridge({ root: paths.root, store, config });
+  await codexBridge.init();
+}
+
 // core and the enabled extensions are read when a frame arrives, not when this is built, which
 // is the only reason the handler can exist before them.
-const onFrame = frameObserver({
+const observeFrame = frameObserver({
   store,
   core: { acceptFrame: (frame, peer) => core.acceptFrame(frame, peer) },
   observers: [(frame, peer) => milestone?.observeFrame(frame, peer), (frame, peer) => codeReview?.observeFrame(frame, peer)]
 });
+const onFrame = async (...args) => { try { return await observeFrame(...args); } finally { codexBridge?.kick(); } };
 const receiver = Object.keys(targets).length > 0
   ? await startReceiver(
     onFrame,
@@ -68,6 +77,7 @@ const receiver = Object.keys(targets).length > 0
 core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
 if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });
+codexBridge?.kick();
 const token = crypto.randomBytes(32).toString("hex"); let closing = false;
 const controlSockets = new Set();
 const server = net.createServer((socket) => accept(socket));
@@ -141,7 +151,8 @@ async function shutdown() {
   if (closing) return; closing = true;
   const serverClosed = new Promise((resolve) => server.close(resolve));
   for (const socket of controlSockets) socket.destroy();
-  await Promise.allSettled([serverClosed, receiver.close(), store.close()]);
+  await Promise.allSettled([serverClosed, receiver.close(), codexBridge?.close()]);
+  await store.close();
   await daemonLock.close().catch(() => {});
   await Promise.allSettled([paths.controlSocket, paths.controlToken, paths.daemon, paths.daemonLock].map((file) => fsp.unlink(file))); process.exit(0);
 }
@@ -159,5 +170,5 @@ function publicSendArgs(args) {
   }
   return args;
 }
-function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter((item) => item && item !== "codex-wake"))].sort(); if (names.some((name) => !["code-review", "milestone"].includes(name))) throw new Error("unsupported extension"); return names; }
+function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter((item) => item && item !== "codex-wake"))].sort(); if (names.some((name) => !["code-review", "milestone", "codex-wake-bridge"].includes(name))) throw new Error("unsupported extension"); return names; }
 process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown);

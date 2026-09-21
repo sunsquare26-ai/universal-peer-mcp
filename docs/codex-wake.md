@@ -69,10 +69,9 @@ the tests. Live model-turn execution is not yet verified.
 
 ## Remaining integration and unverified behavior
 
-This patch adds an explicit callable wake transport. It does **not** automatically
-subscribe to existing `peer_reply`/milestone ledger events and wake a Codex thread.
-A caller must invoke `codex_wake` for now. Automatic event routing remains separate
-work and must bind the receiving thread and deduplication IDs explicitly.
+Explicit tools and an opt-in automatic bridge are available. Existing installations
+remain unchanged unless their daemon is explicitly started with the bridge enabled.
+The current ChatGPT host listener limitation below applies to both paths.
 
 The connection closes after a turn acknowledgement. Whether a particular host
 continues that turn after this auxiliary client disconnects, and routes any later
@@ -91,3 +90,67 @@ its already-running app-server listener. Merely starting an independent
 `codex app-server --listen unix://PATH` does not expose the existing app thread.
 A host-provided listener/bridge is required; no app restart or configuration
 change is prescribed as a proven fix.
+
+## Automatic peer-event bridge
+
+The daemon can route verified `peer_reply` and `milestone_completion_accepted`
+events to an allowlisted Codex thread. No model, effort, or permissions are
+changed. Enabling automatic wake can incur the destination thread's normal model
+cost; authorize that workload before enabling it.
+
+Create owned mode-0600 `codex-wake-bridge.json` beside `codex-targets.json`:
+
+```json
+{
+  "routes": [
+    {
+      "peerAlias": "worker",
+      "codexAlias": "review",
+      "events": ["peer_reply", "milestone_completion_accepted"]
+    }
+  ]
+}
+```
+
+`worker` must already be allowlisted in `targets.json`; `review` resolves through
+`codex-targets.json`. The sender alias comes from the original durable request,
+not an incoming frame's assertion. Only events correlated to that request and
+thread are eligible. No source message body, verdict text, or milestone payload
+is copied into the wake notification or its new receipt. The notification carries
+only event type, peer alias, and request/response IDs, directing Codex to inspect
+its existing ledger.
+
+Start the universal-peer daemon with `serve --enable codex-wake-bridge`; add
+`--enable milestone` to produce milestone completion events and optionally
+`--enable codex-wake` for the manual tools. An already-running daemon retains its
+startup extensions: changing an MCP facade's arguments does not hot-enable the
+bridge. Use the installation's normal daemon restart procedure only when existing
+work permits it; this patch has not restarted the user's daemon or application.
+
+First enable starts at the current event-log tail. To intentionally process older
+events on the **first** enable, add `"afterSeq": 0` (or a chosen existing sequence)
+to the configuration. Once created, the durable cursor takes precedence; changing
+`afterSeq` later cannot replay processed events. Configuration is read once on
+daemon startup.
+
+The private `codex-wake-bridge/` directory contains `cursor.json` and per-event
+receipt files. States are `reserved`, `accepted`, `unavailable`, or `uncertain`;
+`cursor.json` records the latest delivery outcome. Deterministic message IDs are
+bound to the event kind, response/completion ID, source alias, and destination
+alias. A duplicate event at a later sequence or a daemon restart therefore does
+not dispatch twice. A crash after reservation is treated as uncertain even if no
+send can be proven, prioritizing at-most-once dispatch over silent retries.
+
+A missing listener records `unavailable` and advances the cursor. Lost replies and
+in-flight reservations record `uncertain`. Neither is automatically retried when
+the host returns, a new event arrives, or the daemon restarts. The bridge has no
+polling timer: it runs at startup and after inbound frame processing. Distinct new
+events are processed normally. Storage corruption stops the bridge and records
+`bridge_storage_failure` in the checkpoint when storage is still writable; the
+peer receiver continues its own work.
+
+Integration tests feed real `EventStore` records through the bridge and actual
+`CodexWake` dispatch with a fixture app-server response layer, covering source
+correlation, duplicate events, restart, unavailable listeners, lost acknowledgement,
+crash reservation, privacy, and first-enable cursors. Real model turns remain
+unverified and no paid model calls were made.
