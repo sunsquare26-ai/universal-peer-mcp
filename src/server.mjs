@@ -1,3 +1,4 @@
+import { CodexWake, codexWakeTools } from "./extensions/codex-wake/index.mjs";
 import { controlCall, ensureDaemon } from "./core/control.mjs";
 import { statePaths } from "./core/state-paths.mjs";
 import { createFacade } from "./mcp/facade.mjs";
@@ -5,6 +6,8 @@ import { toolDefinitions } from "./mcp/tools.mjs";
 import { loadTargets, targetTableDigest } from "./core/target-config.mjs";
 
 const paths = statePaths();
+const wakeEnabled = (process.env.CLAUDE_PEER_MCP_EXTENSIONS ?? "").split(",").map((s) => s.trim()).includes("codex-wake");
+const codexWake = wakeEnabled ? new CodexWake({ root: paths.root }) : null;
 await ensureDaemon();
 const daemon = await controlCall("daemon_status");
 const admin = daemon.admin === true;
@@ -53,7 +56,7 @@ function orderedTable() {
 
 const facade = createFacade(async () => {
   const reading = await orderedTable();
-  return { tools: toolDefinitions(Object.keys(reading.table), { admin, extensions: enabledExtensions, requestedExtensions }), callTool: (name, args) => callTool(reading, name, args) };
+  return { tools: [...toolDefinitions(Object.keys(reading.table), { admin, extensions: enabledExtensions, requestedExtensions }), ...(wakeEnabled ? codexWakeTools() : [])], callTool: (name, args) => callTool(reading, name, args) };
 });
 
 // A call that names no alias can still reach a target. A milestone ACK recovery is aimed by the
@@ -66,6 +69,8 @@ const facade = createFacade(async () => {
 const REACHES_A_TARGET_UNNAMED = new Set(["milestone_recover_ack"]);
 
 async function callTool(reading, name, args) {
+  if (codexWake && name === "codex_status") return codexWake.status(args);
+  if (codexWake && name === "codex_wake") return codexWake.wake(args);
   const { table, unreadable } = reading;
   const aliases = Object.keys(table);
   const digest = targetTableDigest(table);
@@ -160,4 +165,4 @@ process.stdin.on("data", (chunk) => {
 });
 async function handle(line) { let request; try { request = JSON.parse(line); } catch { return write({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }); } const response = await facade.handle(request); if (response !== null) write(response); }
 function write(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
-function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); return names.filter((name) => ["code-review", "milestone"].includes(name)); }
+function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); return names.filter((name) => ["code-review", "milestone", "codex-wake-bridge"].includes(name)); }

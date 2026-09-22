@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { readScreen } from "./screen.mjs";
 
+import BUNDLED_WS from "./bundled-ws-hashes.json" with { type: "json" };
+
 const ROOT = path.resolve(new URL("..", import.meta.url).pathname);
 
 const ALLOWED_ROOT_FILES = new Set([
@@ -40,7 +42,7 @@ const DENY_PATH = [
 const PACK_EXTENSIONS = new Set(["mjs", "md", "json", "toml"]);
 const PACK_EXTENSIONLESS = new Set(["LICENSE", "NOTICE"]);
 export function packedPathOffence(file) {
-  if (file === SIGNED_IMAGE) return null;
+  if (file === SIGNED_IMAGE || Object.hasOwn(BUNDLED_WS, file)) return null;
   const base = file.split("/").pop();
   const dot = base.lastIndexOf(".");
   if (dot < 1) return PACK_EXTENSIONLESS.has(base) ? null : `${file}: no extension and not on the publish allowlist`;
@@ -250,7 +252,7 @@ test("pack manifest matches the publish allowlist", async () => {
     expect(file.startsWith("/")).toBe(false);
     expect(file.split("/").includes("..")).toBe(false);
     expect(file.includes("\\")).toBe(false);
-    const allowedPath = ALLOWED_PREFIXES.some((prefix) => file.startsWith(prefix)) || (!file.includes("/") && ALLOWED_ROOT_FILES.has(file));
+    const allowedPath = Object.hasOwn(BUNDLED_WS, file) || ALLOWED_PREFIXES.some((prefix) => file.startsWith(prefix)) || (!file.includes("/") && ALLOWED_ROOT_FILES.has(file));
     if (!allowedPath) throw new Error(`file outside the publish allowlist: ${file}`);
   }
   for (const required of REQUIRED) expect(files).toContain(required);
@@ -258,7 +260,7 @@ test("pack manifest matches the publish allowlist", async () => {
 
 test("pack manifest carries no test, fixture, design record or .claude trace", async () => {
   const files = await packedFiles();
-  const offenders = files.filter((file) => DENY_PATH.some((pattern) => pattern.test(file)));
+  const offenders = files.filter((file) => !Object.hasOwn(BUNDLED_WS, file) && DENY_PATH.some((pattern) => pattern.test(file)));
   expect(offenders).toEqual([]);
 }, 60_000);
 
@@ -280,7 +282,14 @@ test("packed content leaks no home path, live identifier, secret or internal nam
   const files = await packedFiles();
   const denyTerms = await operatorDenyTerms();
   const offenders = [];
-  for (const file of files) offenders.push(...scanBody(file, await scannableText(file), { denyTerms }));
+  for (const file of files) {
+    if (Object.hasOwn(BUNDLED_WS, file)) {
+      // Reviewed third-party bytes include upstream protocol constants/authors.
+      // Exact hashes permit only this pinned package, never arbitrary node_modules.
+      expect(digest(await fsp.readFile(path.join(ROOT, file)))).toBe(BUNDLED_WS[file]);
+    } else offenders.push(...scanBody(file, await scannableText(file), { denyTerms }));
+  }
+  for (const file of Object.keys(BUNDLED_WS)) expect(files).toContain(file);
   expect(offenders).toEqual([]);
 }, 60_000);
 
@@ -300,7 +309,7 @@ test("every committed file is scanned, not only the packed ones", async () => {
   expect(offenders).toEqual([]);
   // The point of this test is the delta: files that ship in git but not in the tarball.
   expect(outsideTarball.length).toBeGreaterThan(0);
-  for (const packedPath of packedSet) expect(files).toContain(packedPath);
+  for (const packedPath of packedSet) if (!Object.hasOwn(BUNDLED_WS, packedPath)) expect(files).toContain(packedPath);
 }, 60_000);
 
 test("the leak scanner detects every class it claims to detect", () => {

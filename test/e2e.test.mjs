@@ -66,6 +66,8 @@ for (const file of execFileSync("git", ["-C", ROOT, "ls-files", "-z", "-c", "-o"
   await fsp.mkdir(path.dirname(to), { recursive: true });
   await fsp.copyFile(path.join(ROOT, file), to);
 }
+// Carry the exact pinned production dependency into the offline package build.
+await fsp.cp(path.join(ROOT, "node_modules/ws"), path.join(dirs.clone, "node_modules/ws"), { recursive: true });
 const cloneTree = await treeHash(dirs.clone);
 const packed = await step("npm pack", "npm", npmArgs(["pack", "--pack-destination", dirs.tarball, "--json"]), { cwd: dirs.clone });
 const tarball = path.join(dirs.tarball, JSON.parse(packed.stdout.slice(packed.stdout.indexOf("[")))[0].filename);
@@ -92,6 +94,7 @@ test("a clean clone packs, installs into an empty prefix and starts with no user
   expect(steps.map((entry) => entry.code)).toEqual([0, 0, 0]);
   expect(cloneTree.hash).toBe(baseline.tree.hash);
   expect(cloneTree.files).toBe(baseline.tree.files);
+  expect(JSON.parse(await fsp.readFile(path.join(installed, "node_modules/ws/package.json"), "utf8")).version).toBe("8.21.3");
   // packing and installing must not touch the tree they read
   expect(await treeHash(dirs.clone)).toEqual(cloneTree);
 
@@ -99,7 +102,7 @@ test("a clean clone packs, installs into an empty prefix and starts with no user
   for (const shipped of ["src/cli.mjs", "src/daemon.mjs", "src/doctor.mjs", "README.md", "LICENSE", "SECURITY.md", "targets.example.json"]) {
     expect((await fsp.stat(path.join(installed, shipped))).isFile()).toBeTrue();
   }
-  for (const absent of ["test", "fixtures", "node_modules", "package-lock.json"]) expect(await missing(path.join(installed, absent))).toBeTrue();
+  for (const absent of ["test", "fixtures", "package-lock.json"]) expect(await missing(path.join(installed, absent))).toBeTrue();
 
   // doctor writes nothing, and the state directory it names is the one the environment
   // chose, not the developer's.
@@ -502,7 +505,7 @@ async function treeHash(dir) {
   const walk = async (rel) => {
     for (const entry of await fsp.readdir(path.join(dir, rel || "."), { withFileTypes: true })) {
       const next = rel ? `${rel}/${entry.name}` : entry.name;
-      if (!rel && (entry.name === ".git" || entry.name === "dist")) continue;
+      if (!rel && (entry.name === ".git" || entry.name === "dist" || entry.name === "node_modules")) continue;
       if (entry.isDirectory()) await walk(next);
       else if (entry.isFile()) files.push(`./${next}`);
     }

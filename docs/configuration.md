@@ -121,7 +121,7 @@ universal-peer-mcp [serve [--enable milestone] [--enable code-review] | doctor]
 - `doctor` — report platform, architecture, runtime, state directory, targets file, Claude session registry, and codex-wake status. Reads only: it never creates the state directory or any file. Its output goes through the same public projection the MCP tools use (`src/mcp/redact.mjs`), so it prints no token, session id, socket, or process argument, and the only path it prints in full is one under your own home, shortened to `~`. Anything else, including a state directory you pointed elsewhere and a path quoted inside an error message, comes out as `[path]`. The Claude registry check is a compatibility check, not just a permission check: an entry whose `peerProtocol` is not `1`, an entry missing `notify_idle` or `reply_across_default_dirs`, and an entry that will not parse each make `claudeRegistry.ok` false. Field by field: [troubleshooting.md](troubleshooting.md).
 - Anything else, or an unknown `--enable` value, prints usage and exits `2`.
 
-Extensions are off unless named. `milestone` and `code-review` add their own tools to the list; a `codex-wake` module exists in the tree but is disabled and exposes nothing.
+Extensions are off unless named. `milestone` and `code-review` add their own tools to the list; `codex-wake` adds opt-in tools for existing Codex app-server threads. See [codex-wake.md](codex-wake.md) for the separate target configuration and host-listener requirement.
 
 ## MCP client configuration
 

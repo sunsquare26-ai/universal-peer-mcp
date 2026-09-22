@@ -308,3 +308,13 @@ The last line deletes your targets and the local event history. Nothing outside 
 Apache-2.0. See [LICENSE](LICENSE). Copyright 이형석 (Hyungseok Lee).
 
 Anthropic, Claude, OpenAI, and Codex are trademarks of their respective owners. This project is not an official Anthropic or OpenAI project and is not affiliated with, endorsed by, or sponsored by either company.
+
+### Waking Codex
+
+An opt-in existing-thread adapter is available with `serve --enable codex-wake`.
+It requires the receiving host to expose an app-server socket; it cannot wake
+a stdio-only ChatGPT app process. See [configuration and verified limits](docs/codex-wake.md).
+
+Automatic verified reply/completion notifications are available separately with
+`serve --enable codex-wake-bridge` and an explicit peer-to-Codex routing file.
+They remain off by default; the same existing-host listener requirement applies.
