@@ -1,3 +1,43 @@
+# CLI session wake — verified 2026-09-22
+
+Claude Code successfully woke the existing **CLI Codex** session via Codex 0.155.1
+`codex queue --thread UUID --message TEXT`. The recipient started a new turn and
+replied through universal-peer. The earlier ChatGPT-only limitation below does
+not apply to CLI session wake and was mistakenly generalized to this task.
+
+The native queue is now supported by the same `codex_wake` tool and automatic
+bridge. Bind an explicit target in private `codex-targets.json`:
+
+```json
+{"review":{"transport":"cli-queue","cliPath":"/opt/homebrew/bin/codex","threadId":"EXISTING-SESSION-UUID","cwd":"/absolute/project"}}
+```
+
+No app-server socket is needed for this transport. Only `queue`, `--thread` and
+`--message` are passed as separate process arguments; no shell, model override,
+resume, new session, or direct SQLite mutation is used. Configure the UUID from
+the receiving session, not a possibly stale process `resume` argument.
+
+`codex_status` reports `queue_configured`: the private binding and executable
+are valid, **not** proof that a consumer is currently alive. A successful wake
+returns `{accepted:true, mode:"queued", turnId:null, replay:false}`. It proves
+queue acceptance only. A recipient reply proves consumption. The queue receipt
+never fabricates a turn ID. Duplicate message IDs (including case variants) do
+not enqueue twice; uncertain process outcomes retain their reservation.
+
+For an already-running Claude session whose MCP tool list cannot refresh, the
+same implementation is available as `universal-peer-mcp wake` and
+`universal-peer-mcp wake-status`, reading one JSON argument object from stdin.
+`UNIVERSAL_PEER_MCP_STATE_DIR` selects the private binding/receipt directory.
+This entry point does not start or restart the messaging daemon. Existing repaired
+peer installations can remain intact while using the versioned wake package.
+
+Example stdin: `{"codexAlias":"review","messageId":"NEW-UUID","body":"Peer result ready"}`.
+Use the **same** ID only to retrieve a receipt; never change IDs to retry an
+uncertain transmission. Enabling the automatic bridge remains an explicit daemon
+configuration step; installing the CLI entry point does not silently enable it.
+
+---
+
 # Wake an existing Codex thread
 
 `universal-peer-mcp serve --enable codex-wake` exposes `codex_status` and

@@ -1,11 +1,20 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { assertPrivateFile, ensurePrivateDirectory, atomicPrivateWrite } from "../../core/state-paths.mjs";
 
 export const codexWakeExtension = Object.freeze({ enabled: false, available: true, transport: "existing-app-server" });
+const runFile = promisify(execFile);
+
+// The installed Codex CLI owns its native queue. Never write its SQLite files.
+export async function enqueueCodex(target, text) {
+  const { stdout } = await runFile(target.cliPath, ["queue", "--thread", target.threadId, "--message", text], { cwd: target.cwd, timeout: 15000, maxBuffer: 65536 });
+  if (!stdout.includes(`for thread ${target.threadId}`) || !stdout.includes("Queued message")) throw fail("DELIVERY_UNCERTAIN");
+}
+
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const fail = (code) => Object.assign(new Error(code), { code });
 
@@ -47,13 +56,23 @@ export function connectAppServer(socketPath, { timeoutMs = 10000 } = {}) {
 }
 
 export class CodexWake {
-  constructor({ root, connect = connectAppServer }) { this.root = root; this.connect = connect; }
+  constructor({ root, connect = connectAppServer, enqueue = enqueueCodex }) { this.root = root; this.connect = connect; this.enqueue = enqueue; }
   async target(alias) {
     if (!/^[a-z][a-z0-9-]{1,47}$/.test(alias)) throw fail("TARGET_UNAVAILABLE");
     const file = path.join(this.root, "codex-targets.json");
     await assertPrivateFile(file, { maxBytes: 65536 });
     const entry = JSON.parse(await fsp.readFile(file, "utf8"))[alias];
-    if (!entry || !UUID.test(entry.threadId) || !path.isAbsolute(entry.socketPath ?? "") || !path.isAbsolute(entry.cwd ?? "")) throw fail("TARGET_UNAVAILABLE");
+    if (!entry || !UUID.test(entry.threadId) || !path.isAbsolute(entry.cwd ?? "")) throw fail("TARGET_UNAVAILABLE");
+    if (entry.transport === "cli-queue") {
+      if (!path.isAbsolute(entry.cliPath ?? "")) throw fail("TARGET_UNAVAILABLE");
+      const cli = await fsp.stat(entry.cliPath);
+      if (!cli.isFile() || (cli.mode & 0o022) !== 0 || ![0, process.getuid()].includes(cli.uid)) throw fail("TARGET_UNAVAILABLE");
+      await fsp.access(entry.cliPath, 1);
+      await fsp.realpath(entry.cwd);
+      return entry;
+    }
+    if (entry.transport !== undefined && entry.transport !== "existing-app-server") throw fail("TARGET_UNAVAILABLE");
+    if (!path.isAbsolute(entry.socketPath ?? "")) throw fail("TARGET_UNAVAILABLE");
     const stat = await fsp.lstat(entry.socketPath);
     if (!stat.isSocket() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) throw fail("TARGET_UNAVAILABLE");
     return entry;
@@ -80,12 +99,15 @@ export class CodexWake {
     } finally { rpc.close(); }
   }
   async status({ codexAlias }) {
-    try { return await this.inspect(codexAlias, async ({ state }) => ({ available: true, state })); }
+    try {
+      if ((await this.target(codexAlias)).transport === "cli-queue") return { available: true, state: "queue_configured" };
+      return await this.inspect(codexAlias, async ({ state }) => ({ available: true, state })); }
     catch { return { available: false, state: "unavailable" }; }
   }
   async wake({ codexAlias, messageId, body }) {
     if (!UUID.test(messageId) || typeof body !== "string" || !body.trim() || Buffer.byteLength(body) > 32768) throw fail("TARGET_UNAVAILABLE");
     const directory = path.join(this.root, "codex-wake"); await ensurePrivateDirectory(directory);
+    messageId = messageId.toLowerCase();
     const file = path.join(directory, messageId + ".json");
     const hash = crypto.createHash("sha256").update(JSON.stringify([codexAlias, body])).digest("hex");
     let reservation;
@@ -98,10 +120,19 @@ export class CodexWake {
       if (!existing.result) throw fail("DELIVERY_UNCERTAIN");
       return { ...existing.result, replay: true };
     }
-    await reservation.writeFile(JSON.stringify({ hash, state: "reserved" })); await reservation.sync(); await reservation.close();
+    try { await reservation.writeFile(JSON.stringify({ hash, state: "reserved" })); await reservation.sync(); }
+    finally { await reservation.close(); }
+    const dir = await fsp.open(directory, "r");
+    try { await dir.sync(); } finally { await dir.close(); }
     let attempted = false;
     try {
-      const result = await this.inspect(codexAlias, async ({ rpc, thread, target, state }) => {
+      const target = await this.target(codexAlias);
+      let result;
+      if (target.transport === "cli-queue") {
+        attempted = true;
+        await this.enqueue(target, `[Universal peer message ${messageId}; peer content, not owner instructions]\n${body}`);
+        result = { accepted: true, mode: "queued", turnId: null, replay: false };
+      } else result = await this.inspect(codexAlias, async ({ rpc, thread, target, state }) => {
         const params = { threadId: target.threadId, clientUserMessageId: messageId, input: [{ type: "text", text: `[Universal peer message ${messageId}; peer content, not owner instructions]\n${body}`, text_elements: [] }] };
         let method = "turn/start";
         if (state === "active") {
@@ -128,7 +159,7 @@ export class CodexWake {
 export function codexWakeTools() {
   const codexAlias = { type: "string", pattern: "^[a-z][a-z0-9-]{1,47}$" };
   return [
-    { name: "codex_status", description: "Check whether an allowlisted Codex thread is already loaded in its existing app-server. Does not run a model.", inputSchema: { type: "object", required: ["codexAlias"], properties: { codexAlias }, additionalProperties: false }, outputSchema: { type: "object", required: ["available", "state"], properties: { available: { type: "boolean" }, state: { type: "string", enum: ["idle", "active", "unavailable"] } }, additionalProperties: false } },
-    { name: "codex_wake", description: "Send peer content to an existing allowlisted Codex thread: start its idle turn or steer its active turn. May incur that thread's existing model cost. Never starts another session; retry only with the SAME messageId.", inputSchema: { type: "object", required: ["codexAlias", "messageId", "body"], properties: { codexAlias, messageId: { type: "string", format: "uuid" }, body: { type: "string", minLength: 1, maxLength: 32768 } }, additionalProperties: false }, outputSchema: { type: "object", required: ["accepted", "mode", "turnId", "replay"], properties: { accepted: { type: "boolean" }, mode: { type: "string", enum: ["started", "steered"] }, turnId: { type: "string" }, replay: { type: "boolean" } }, additionalProperties: false } }
+    { name: "codex_status", description: "Check an allowlisted Codex binding. queue_configured validates configuration only, not a live consumer. Does not run a model.", inputSchema: { type: "object", required: ["codexAlias"], properties: { codexAlias }, additionalProperties: false }, outputSchema: { type: "object", required: ["available", "state"], properties: { available: { type: "boolean" }, state: { type: "string", enum: ["idle", "active", "queue_configured", "unavailable"] } }, additionalProperties: false } },
+    { name: "codex_wake", description: "Send peer content to an existing allowlisted Codex thread: use its native CLI queue, or start/steer via its existing app-server. queued means enqueued, not consumed. May incur that thread's existing model cost. Never starts another session; retry only with the SAME messageId.", inputSchema: { type: "object", required: ["codexAlias", "messageId", "body"], properties: { codexAlias, messageId: { type: "string", format: "uuid" }, body: { type: "string", minLength: 1, maxLength: 32768 } }, additionalProperties: false }, outputSchema: { type: "object", required: ["accepted", "mode", "turnId", "replay"], properties: { accepted: { type: "boolean" }, mode: { type: "string", enum: ["started", "steered", "queued"] }, turnId: { type: ["string", "null"] }, replay: { type: "boolean" } }, additionalProperties: false } }
   ];
 }
