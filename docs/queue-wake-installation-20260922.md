@@ -15,3 +15,7 @@
 - 설치본 최종 실측 요청: `573b74b5-2123-4aba-a9fb-a7a421156ec4`, wake ID `494c6243-9268-4eb4-9722-42ab8d7866d4`. 큐 등록과 실제 수신은 구분하며, 최종 수신 결과는 후속 기록으로 남긴다.
 
 코드를 되돌려야 할 경우 개인 wrapper의 실행 경로를 이전 검증 설치본으로 바꾸면 된다. 중복 방지 영수증과 기존 메시지 원장은 삭제하지 않는다.
+
+## 최종 설치본 실측 성공
+
+Claude가 설치된 `universal-peer-wake`를 통해 위 wake ID를 전송했다. 설치본 영수증은 `accepted:true, mode:queued, replay:false`였다. 기존 Codex 턴 종료 후 **같은 대상 세션에서 새 턴으로 해당 messageId와 본문을 수신**했다. 수신 측은 universal-peer로 `PEER_REPLY WAKE-INSTALLED-55bc859-OK`를 회신했다(회신 messageId `6d563b8c-1e4a-49f7-96de-a8047c96e178`). 이로써 직접 CLI 명령만의 시험이 아니라 **설치본 → native queue → 기존 Codex 세션 새 턴 → 피어 회신 전송**까지 확인했다. 상대의 회신 읽기 여부와 큐 소비 성공은 별개이다.
