@@ -1,9 +1,9 @@
 {
   "name": "universal-peer-mcp",
   "version": "0.1.0",
-  "description": "Codex가 실행 중인 Claude Code 세션과 직접 대화하게 해주는 로컬 MCP 서버",
+  "description": "Codex\uac00 \uc2e4\ud589 \uc911\uc778 Claude Code \uc138\uc158\uacfc \uc9c1\uc811 \ub300\ud654\ud558\uac8c \ud574\uc8fc\ub294 \ub85c\uceec MCP \uc11c\ubc84",
   "license": "Apache-2.0",
-  "author": "이형석",
+  "author": "\uc774\ud615\uc11d",
   "repository": "github:sunsquare26-ai/universal-peer-mcp",
   "type": "module",
   "private": false,
@@ -38,5 +38,8 @@
   },
   "dependencies": {
     "ws": "8.21.3"
-  }
+  },
+  "bundleDependencies": [
+    "ws"
+  ]
 }

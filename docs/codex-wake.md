@@ -54,7 +54,7 @@ state directory (the same directory as `targets.json`):
 {
   "review": {
     "socketPath": "/absolute/private/app-server.sock",
-    "threadId": "00000000-0000-4000-8000-000000000001",
+    "threadId": "10000000-0000-4000-8000-000000000001",
     "cwd": "/absolute/project"
   }
 }
@@ -75,7 +75,7 @@ binding. The adapter does not restart an app or create another server/session.
 After authorizing the receiving thread's usual model cost, call:
 
 ```json
-{"codexAlias":"review","messageId":"00000000-0000-4000-8000-000000000002","body":"The requested implementation is ready to inspect."}
+{"codexAlias":"review","messageId":"10000000-0000-4000-8000-000000000002","body":"The requested implementation is ready to inspect."}
 ```
 
 An idle thread receives `turn/start`; an active thread receives `turn/steer`

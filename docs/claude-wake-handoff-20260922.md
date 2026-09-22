@@ -17,9 +17,9 @@
 유니버설 피어의 자동 깨우기 패치를 이어서 마무리해 주세요.
 메시지 수신·회신 복구는 이미 적용된 별도 작업이므로 다시 하지 마세요.
 
-기준 작업본: /Users/hyungseoklee/peer-codex-wake
+기준 작업본: ~/peer-codex-wake
 브랜치: session/peer/20260921-codex-wake, 기준 커밋 56a670d
-재개 기록: /Users/hyungseoklee/peer-codex-wake-finish/docs/claude-wake-handoff-20260922.md
+재개 기록: ~/peer-codex-wake-finish/docs/claude-wake-handoff-20260922.md
 먼저 기준 작업본의 docs/codex-wake.md를 읽으세요.
 
 목표는 Claude의 검증된 회신 또는 완료 이벤트가 도착했을 때 현재 ChatGPT 앱의 기존 Codex 대화가 자동으로 다음 턴을 시작하는 것입니다.
@@ -28,7 +28,7 @@
 
 1. 현재 앱 프로세스와 호스트가 실제 제공하는 기존 대화 연결 수단을 읽기 전용으로 확인하세요. 이전 PID·소켓·세션 주소는 재사용하지 말고 현재 식별자를 확인하세요. 공개된 연결 수단이 없다면 없다고 보고하세요.
 2. 지원되는 연결 수단이 확인되면 별도 브랜치/워크트리에서 어댑터를 완성하세요. 임의의 새 codex exec/resume 또는 별도 app-server를 띄운 것을 현재 앱 대화 깨우기 성공으로 보고하지 마세요. 연결된 익명 소켓을 수신 endpoint로 취급하거나 앱의 IPC·프로토콜을 추정해 주입하지 마세요.
-3. 기존 설치본 /Users/hyungseoklee/friday-mini/var/tools/universal-peer-mcp/0.1.0-r1/ 에는 rebind/spool/wait 복구 등 독립 변경이 있습니다. 구버전 기준의 wake 패키지로 덮어쓰지 말고, 통합이 필요하면 정확한 차이를 보존하세요. 현재 정상 통신 데몬과 앱을 임의 종료하지 마세요.
+3. 기존 설치본 ~/friday-mini/var/tools/universal-peer-mcp/0.1.0-r1/ 에는 rebind/spool/wait 복구 등 독립 변경이 있습니다. 구버전 기준의 wake 패키지로 덮어쓰지 말고, 통합이 필요하면 정확한 차이를 보존하세요. 현재 정상 통신 데몬과 앱을 임의 종료하지 마세요.
 4. 동일 messageId 중복 방지, 요청과 회신의 상관관계, 기존 권한/모델 유지, 불명확한 전송의 자동 재시도 금지를 지키세요. 승인 요청을 대신 승인하지 마세요.
 5. 먼저 관련 시험과 무모델 연결 검증을 하세요. 실제 모델 호출에 비용 승인이 필요한 경우 목적·횟수·상한을 제시하세요. 현재 앱의 동일 threadId가 실제 새 턴을 시작하고 화면에 결과가 나타나는 것까지 확인해야 실사용 완료입니다. 보조 연결 종료 후 실행 지속 및 승인 UI 전달도 확인하세요.
 

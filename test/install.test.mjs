@@ -57,7 +57,7 @@ test("the packed tarball installs into an empty prefix and the installed bin run
     const home = path.join(prefix, "lib", "node_modules", "universal-peer-mcp");
     const bin = path.join(prefix, "bin", "universal-peer-mcp");
     expect((await fsp.lstat(bin)).isSymbolicLink() || (await fsp.stat(bin)).isFile()).toBe(true);
-    expect(await missing(path.join(home, "node_modules"))).toBe(true);
+    expect(JSON.parse(await fsp.readFile(path.join(home, "node_modules/ws/package.json"), "utf8")).version).toBe("8.21.3");
     for (const shipped of ["targets.example.json", "README.md", "LICENSE", "docs/demo-ack.md", "docs/configuration.md", "examples/claude-mcp.json", "examples/codex-config.toml", "src/doctor.mjs"]) {
       expect((await fsp.stat(path.join(home, shipped))).isFile()).toBe(true);
     }
