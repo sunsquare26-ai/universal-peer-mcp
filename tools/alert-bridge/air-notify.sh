@@ -38,10 +38,23 @@ printf '%s alert kind=%s key=%s code=%s\n' "$now" "$kind" "$key" "$code" >> "$lo
 chmod 600 "$log"
 
 # Every character of $text is validated above or fixed here, so it cannot close the quotes.
-remote="osascript -e 'display notification \"${text}\" with title \"UniversalPeer\"'"
-if "$ssh_bin" -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$air" "$remote" >/dev/null 2>&1; then
-  printf '%s notify key=%s air=ok\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$key" >> "$log"; exit 0
-else
-  rc=$?
-  printf '%s notify key=%s air=failed rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$key" "$rc" >> "$log"; exit 2
+# Method 3 (default): ask System Events, which runs in the Air's GUI session, to post it.
+# Method 1 (fallback): osascript's own notification from the SSH session.
+# Measured 2026-09-29: both arrive in the Air's Notification Center (under 스크립트 편집기, 16:23
+# and 16:26 KST); while a Focus mode (업무) is on, the banner itself is not shown.
+remote_events="osascript -e 'tell application \"System Events\" to display notification \"${text}\" with title \"UniversalPeer\"'"
+remote_plain="osascript -e 'display notification \"${text}\" with title \"UniversalPeer\"'"
+ssh_air() { "$ssh_bin" -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes "$air" "$1" >/dev/null 2>&1; }
+ssh_air "$remote_events"; rc=$?
+if [ "$rc" -eq 0 ]; then
+  printf '%s notify key=%s air=ok method=system_events\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$key" >> "$log"; exit 0
 fi
+# 255 is ssh's own failure (Air asleep, unreachable): the fallback would fail the same way.
+if [ "$rc" -ne 255 ]; then
+  ssh_air "$remote_plain"; rc2=$?
+  if [ "$rc2" -eq 0 ]; then
+    printf '%s notify key=%s air=ok method=osascript_fallback rc_events=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$key" "$rc" >> "$log"; exit 0
+  fi
+  rc="$rc2"
+fi
+printf '%s notify key=%s air=failed rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$key" "$rc" >> "$log"; exit 2

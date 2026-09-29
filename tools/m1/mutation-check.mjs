@@ -26,6 +26,8 @@ const MUTANTS = [
   ["trace leaks the body", "src/core/trace.mjs", "for (const key of [\"reason\", \"errorCode\",", "for (const key of [\"body\", \"bodyFile\", \"reason\", \"errorCode\",", "test/m1/trace.test.mjs"],
   ["bridge accepts any key", "tools/alert-bridge/air-notify.sh", "[[ \"$key\" =~ ^[a-z0-9_:.-]{1,160}$ ]] || { echo \"bad key\" >&2; exit 64; }", "", "test/m1/air-notify.test.mjs"],
   ["bridge notifies before logging", "tools/alert-bridge/air-notify.sh", "printf '%s alert kind=%s key=%s code=%s\\n' \"$now\" \"$kind\" \"$key\" \"$code\" >> \"$log\" || exit 1", "true", "test/m1/air-notify.test.mjs"],
+  ["bridge never falls back", "tools/alert-bridge/air-notify.sh", "if [ \"$rc\" -ne 255 ]; then", "if false; then", "test/m1/air-notify.test.mjs"],
+  ["bridge retries a sleeping Air", "tools/alert-bridge/air-notify.sh", "if [ \"$rc\" -ne 255 ]; then", "if true; then", "test/m1/air-notify.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
 ];
 
