@@ -7,9 +7,11 @@ export class EventStore {
   // `onPoisoned` is called once, the first time an append fails, with the same record `health()`
   // returns. Before this, a failed append poisoned the store and most diagnostic writers swallowed
   // the error (`.catch(() => {})`), so "nothing was recorded" and "the ledger is dead" read the same.
-  constructor(paths, { onPoisoned = null } = {}) {
+  // `onAppend` (M3) is told about each row after it is durable, outside the write chain, so it may
+  // append rows of its own. Its failures never reach the writer.
+  constructor(paths, { onPoisoned = null, onAppend = null, onAppendFailed = null } = {}) {
     this.paths = paths; this.events = []; this.chain = Promise.resolve(); this.poisoned = null;
-    this.onPoisoned = onPoisoned; this.lastAppendAt = null; this.lastError = null;
+    this.onPoisoned = onPoisoned; this.onAppend = onAppend; this.onAppendFailed = onAppendFailed; this.lastAppendAt = null; this.lastError = null;
   }
 
   // What `daemon_status` publishes about the ledger. No message text: an error message can carry a
@@ -155,6 +157,9 @@ export class EventStore {
       throw error;
     }
     this.events.push(event); this.lastAppendAt = event.at;
+    // A hook that fails is reported (onAppendFailed), never swallowed; the doorbell sweep also finds
+    // whatever the hook did not finish.
+    if (typeof this.onAppend === "function") setImmediate(() => { Promise.resolve().then(() => this.onAppend(event)).catch((error) => { try { this.onAppendFailed?.(event, error); } catch {} }); });
     return event;
   }
 }

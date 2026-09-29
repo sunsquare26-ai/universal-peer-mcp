@@ -18,13 +18,13 @@ test("file wins over environment, per setting", async () => {
   const s = await loadSettings({ root, env: ENV });
   expect(s.alertCommand).toEqual({ value: "/file/air-notify.sh", source: "file" });
   expect(s.archiveBackup).toEqual({ value: "u@air:/env/archive", source: "env" });
-  expect(settingsStatus(s)).toEqual({ alert: "configured(file)", backup: "configured(env)" });
+  expect(settingsStatus(s)).toEqual({ alert: "configured(file)", backup: "configured(env)", doorbell: "not_configured(default)" });
 });
 
 test("no file: environment, then default", async () => {
   const root = await withFile(null);
-  expect(settingsStatus(await loadSettings({ root, env: ENV }))).toEqual({ alert: "configured(env)", backup: "configured(env)" });
-  expect(settingsStatus(await loadSettings({ root, env: {} }))).toEqual({ alert: "not_configured(default)", backup: "not_configured(default)" });
+  expect(settingsStatus(await loadSettings({ root, env: ENV }))).toEqual({ alert: "configured(env)", backup: "configured(env)", doorbell: "not_configured(default)" });
+  expect(settingsStatus(await loadSettings({ root, env: {} }))).toEqual({ alert: "not_configured(default)", backup: "not_configured(default)", doorbell: "not_configured(default)" });
 });
 
 test("a broken or untrusted file configures nothing, not even from the environment", async () => {
@@ -39,7 +39,7 @@ test("a broken or untrusted file configures nothing, not even from the environme
     const root = await withFile(content, mode);
     const s = await loadSettings({ root, env: ENV });
     expect(s.invalid).toBe(reason);
-    expect(settingsStatus(s)).toEqual({ alert: "not_configured(config_invalid)", backup: "not_configured(config_invalid)", configError: reason });
+    expect(settingsStatus(s)).toEqual({ alert: "not_configured(config_invalid)", backup: "not_configured(config_invalid)", doorbell: "not_configured(config_invalid)", configError: reason });
   }
 });
 

@@ -29,6 +29,7 @@ import { disposeInboundBody, expiredBodyFiles } from "./core/retention.mjs";
 import { maintenanceConfig, MAINTENANCE_INTERVAL_MS, runMaintenance } from "./core/maintenance.mjs";
 import { dayOf } from "./core/days.mjs";
 import { loadSettings, settingsStatus } from "./core/settings.mjs";
+import { DoorbellService } from "./core/doorbell-service.mjs";
 import { createSenderResolver } from "./core/sender-auth.mjs";
 import { acceptPost, ackInbox, bodyDigest, heldPosts, inbox, linkUnmatched, postBindings, recipientMessageId, relinkPost, sessionLineage } from "./core/posts.mjs";
 import { LEGACY_BODIES, LEGACY_BODIES_WARNING } from "./core/settings.mjs";
@@ -150,6 +151,19 @@ const rebindTarget = createSessionRebinder({
 // kernel pid, Claude Code's registry row and the operator's table (src/core/sender-auth.mjs).
 const resolveSender = createSenderResolver({ allowlist: () => targets, selfPid: process.pid, ...(claudeSessionsDir ? { sessionsDir: claudeSessionsDir } : {}) });
 const resolveCodex = createCodexResolver();
+// M3: the doorbell for posts delivered to Codex peers (src/core/doorbell-service.mjs). Every accepted
+// post for a Codex peer gets a durable intent and one ring; intents left open by a restart are rung
+// once more; unknown outcomes older than 30 minutes raise one alarm and are never resent.
+const doorbell = new DoorbellService({ store, root: paths.root, settings, codexPeers: () => codexPeers, alerts });
+store.onAppend = (row) => doorbell.onAppend(row);
+store.onAppendFailed = (row, error) => {
+  const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "HOOK_FAILED";
+  store.append("doorbell_hook_failed", { sourceSeq: row.seq, ...(typeof row.messageId === "string" ? { messageId: row.messageId } : {}), errorCode: code }).catch(() => {});
+  alerts.raise({ kind: "doorbell_hook_failed", key: `doorbell_hook_failed:${row.seq}`, code }).catch(() => {});
+};
+const sweepDoorbells = () => { doorbell.sweep().catch((error) => { alerts.raise({ kind: "doorbell_hook_failed", key: `doorbell_sweep_failed:${new Date().toISOString().slice(0, 13)}`, code: typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "SWEEP_FAILED" }).catch(() => {}); }); };
+setImmediate(sweepDoorbells);
+setInterval(sweepDoorbells, 5 * 60 * 1000).unref();
 core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, rebind: rebindTarget, senderResolver: (peer) => resolveSender(peer), postRecipientFields: (alias) => recipientFieldsOf(resolvePeer(alias, { claude: targets, codex: codexPeers })) });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
 if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });

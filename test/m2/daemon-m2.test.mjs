@@ -26,14 +26,14 @@ async function stand(config) {
 test("settings come from <state>/config.json, whoever starts the daemon; status names the source", async () => {
   const root = await stand(JSON.stringify({ alertCommand: "/usr/bin/true", archiveBackup: "/Volumes/none" }));
   const status = await controlCall("daemon_status", {}, { root });
-  expect(status.settings).toEqual({ alert: "configured(file)", backup: "configured(file)" });
+  expect(status.settings).toEqual({ alert: "configured(file)", backup: "configured(file)", doorbell: "not_configured(default)" });
   expect(status.alerts.bridgeConfigured).toBe(true);
 });
 
 test("a broken config file configures nothing and says so once", async () => {
   const root = await stand("{broken");
   const status = await controlCall("daemon_status", {}, { root });
-  expect(status.settings).toEqual({ alert: "not_configured(config_invalid)", backup: "not_configured(config_invalid)", configError: "not_json" });
+  expect(status.settings).toEqual({ alert: "not_configured(config_invalid)", backup: "not_configured(config_invalid)", doorbell: "not_configured(config_invalid)", configError: "not_json" });
   await stop(root);
   const rows = (await fsp.readFile(statePaths(root).events, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
   expect(rows.filter((r) => r.type === "daemon_config_invalid")).toEqual([expect.objectContaining({ reason: "not_json" })]);

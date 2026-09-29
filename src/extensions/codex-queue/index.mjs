@@ -73,13 +73,25 @@ export function connectAppServer(socketPath, { timeoutMs = 10000 } = {}) {
 }
 
 export class CodexWake {
-  constructor({ root, connect = connectAppServer, enqueue = enqueueCodex, cliVersion: readCliVersion = cliVersion }) { this.root = root; this.connect = connect; this.enqueue = enqueue; this.cliVersion = readCliVersion; }
-  async target(alias) {
+  // `targets(alias)` (optional) supplies the entry instead of `<root>/codex-targets.json` — the
+  // daemon builds it from the peer directory and its settings. `authorize(alias, messageId, entry)`
+  // (optional) is asked before anything is reserved or sent; the daemon uses it to allow only a
+  // message that is in its inbox for that alias and thread and not yet processed.
+  constructor({ root, connect = connectAppServer, enqueue = enqueueCodex, cliVersion: readCliVersion = cliVersion, targets = null, authorize = null }) { this.root = root; this.connect = connect; this.enqueue = enqueue; this.cliVersion = readCliVersion; this.targets = targets; this.authorize = authorize; }
+  // `given`: an entry supplied by the caller for this one call (immutable; the daemon passes the
+  // thread of the post being rung). Validated exactly like one read from a file.
+  async target(alias, given = null) {
     if (!/^[a-z][a-z0-9-]{1,47}$/.test(alias)) throw fail("TARGET_UNAVAILABLE");
-    const file = path.join(this.root, "codex-targets.json");
-    await assertPrivateFile(file, { maxBytes: 65536 });
-    const entry = JSON.parse(await fsp.readFile(file, "utf8"))[alias];
-    if (!entry || !UUID_LOWER.test(entry.threadId) || !path.isAbsolute(entry.cwd ?? "")) throw fail("TARGET_UNAVAILABLE");
+    let entry;
+    if (given) entry = given;
+    else if (this.targets) entry = await this.targets(alias);
+    else {
+      const file = path.join(this.root, "codex-targets.json");
+      await assertPrivateFile(file, { maxBytes: 65536 });
+      entry = JSON.parse(await fsp.readFile(file, "utf8"))[alias];
+    }
+    // cwd is optional: when given, the thread must be running there.
+    if (!entry || !UUID_LOWER.test(entry.threadId) || (entry.cwd !== undefined && !path.isAbsolute(entry.cwd))) throw fail("TARGET_UNAVAILABLE");
     // A target entry is identity and location only; a key that could carry permissions, model or
     // argv (sandbox, extraArgs, ...) makes the whole entry untrusted.
     if (Object.keys(entry).some((key) => !TARGET_KEYS.has(key))) throw fail("TARGET_UNAVAILABLE");
@@ -89,7 +101,7 @@ export class CodexWake {
       const cli = await fsp.stat(entry.cliPath);
       if (!cli.isFile() || (cli.mode & 0o022) !== 0 || ![0, process.getuid()].includes(cli.uid)) throw fail("TARGET_UNAVAILABLE");
       await fsp.access(entry.cliPath, 1);
-      await fsp.realpath(entry.cwd);
+      if (entry.cwd !== undefined) await fsp.realpath(entry.cwd);
       // The queue is used only where the thread's app-server can also be asked whether a turn is
       // running and which release it is: without that, "queued" would hide a held message.
       if (!path.isAbsolute(entry.socketPath ?? "")) throw fail("TARGET_UNAVAILABLE");
@@ -104,8 +116,8 @@ export class CodexWake {
     if (!stat.isSocket() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) throw fail("TARGET_UNAVAILABLE");
     return entry;
   }
-  async inspect(alias, action) {
-    const target = await this.target(alias); const rpc = this.connect(target.socketPath);
+  async inspect(alias, action, given = null) {
+    const target = await this.target(alias, given); const rpc = this.connect(target.socketPath);
     try {
       const init = await rpc.call("initialize", { clientInfo: { name: "universal-peer-mcp", version: "0.1.0" }, capabilities: { experimentalApi: true } });
       const serverVersion = versionOf(init?.userAgent);
@@ -124,7 +136,7 @@ export class CodexWake {
       }
       if (!loaded) throw fail("TARGET_UNAVAILABLE");
       const { thread } = await rpc.call("thread/read", { threadId: target.threadId, includeTurns: true });
-      if (thread.id !== target.threadId || await fsp.realpath(thread.cwd) !== await fsp.realpath(target.cwd)) throw fail("TARGET_UNAVAILABLE");
+      if (thread.id !== target.threadId || (target.cwd !== undefined && await fsp.realpath(thread.cwd) !== await fsp.realpath(target.cwd))) throw fail("TARGET_UNAVAILABLE");
       const state = thread.status?.type;
       if (!["idle", "active"].includes(state)) throw fail("TARGET_UNAVAILABLE");
       return await action({ rpc, thread, target, state, serverVersion });
@@ -140,8 +152,10 @@ export class CodexWake {
   // CLI queue the doorbell waits for the turn to end and the answer says so
   // (`held_behind_running_turn`). Never retried here: an attempt with no clear answer is
   // DELIVERY_UNCERTAIN, and the same messageId answers from the reservation afterwards.
-  async wake({ codexAlias, messageId }) {
+  async wake({ codexAlias, messageId, target: given = null }) {
+    if (given !== null) given = Object.freeze({ ...given });
     if (!UUID_LOWER.test(messageId ?? "")) throw fail("TARGET_UNAVAILABLE");
+    if (this.authorize) { const verdict = await this.authorize(codexAlias, messageId); if (verdict !== true) throw fail(typeof verdict === "string" ? verdict : "WAKE_NOT_AUTHORIZED"); }
     const directory = path.join(this.root, "codex-wake"); await ensurePrivateDirectory(directory);
     const file = path.join(directory, messageId + ".json");
     const hash = crypto.createHash("sha256").update(JSON.stringify([codexAlias, messageId])).digest("hex");
@@ -180,7 +194,7 @@ export class CodexWake {
         const turnId = response?.turn?.id ?? response?.turnId;
         if (typeof turnId !== "string" || !turnId) throw fail("DELIVERY_UNCERTAIN");
         return { accepted: true, mode: state === "active" ? "steered" : "started", turnId, replay: false };
-      });
+      }, given);
       await atomicPrivateWrite(file, JSON.stringify({ hash, state: "accepted", result }) + "\n");
       return result;
     } catch (error) {

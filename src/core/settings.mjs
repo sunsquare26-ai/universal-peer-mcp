@@ -15,11 +15,16 @@ import { assertPrivateFile } from "./state-paths.mjs";
 // nothing at all — not even from the environment — and is reported once: a half-read settings file
 // is a guess about what the operator meant.
 export const SETTINGS_FILENAME = "config.json";
-const KEYS = { alertCommand: "UNIVERSAL_PEER_ALERT_COMMAND", archiveBackup: "UNIVERSAL_PEER_ARCHIVE_BACKUP" };
+// M3 doorbell: the Codex CLI and the app-server socket the doorbell goes through, and the release
+// both must be (the queue fallback, which cannot ask the server, compares against this pin).
+const KEYS = { alertCommand: "UNIVERSAL_PEER_ALERT_COMMAND", archiveBackup: "UNIVERSAL_PEER_ARCHIVE_BACKUP", codexCli: "UNIVERSAL_PEER_CODEX_CLI", codexAppServerSocket: "UNIVERSAL_PEER_CODEX_APP_SERVER_SOCKET", codexVersion: "UNIVERSAL_PEER_CODEX_VERSION" };
 const REMOTE = /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:\/[A-Za-z0-9._/-]*$/;
 const valid = {
   alertCommand: (v) => typeof v === "string" && path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v),
-  archiveBackup: (v) => typeof v === "string" && (REMOTE.test(v) || (path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v)))
+  archiveBackup: (v) => typeof v === "string" && (REMOTE.test(v) || (path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v))),
+  codexCli: (v) => typeof v === "string" && path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v),
+  codexAppServerSocket: (v) => typeof v === "string" && path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v),
+  codexVersion: (v) => typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v)
 };
 
 export async function loadSettings({ root, env = process.env }) {
@@ -59,5 +64,6 @@ export const LEGACY_BODIES_WARNING = "진단 본문 노출 호환창 켜짐";
 // "not_configured(config_invalid)". Never the value itself (it is a path).
 export function settingsStatus(settings) {
   const show = (s) => (s.value ? `configured(${s.source})` : `not_configured(${s.source})`);
-  return { alert: show(settings.alertCommand), backup: show(settings.archiveBackup), ...(settings.invalid ? { configError: settings.invalid } : {}), ...(settings[LEGACY_BODIES]?.value ? { legacyBodiesInDiagnostics: true, warning: LEGACY_BODIES_WARNING } : {}) };
+  const doorbell = settings.codexCli?.value && settings.codexAppServerSocket?.value ? `configured(${settings.codexAppServerSocket.source})` : `not_configured(${settings.codexAppServerSocket?.source ?? "default"})`;
+  return { alert: show(settings.alertCommand), backup: show(settings.archiveBackup), doorbell, ...(settings.invalid ? { configError: settings.invalid } : {}), ...(settings[LEGACY_BODIES]?.value ? { legacyBodiesInDiagnostics: true, warning: LEGACY_BODIES_WARNING } : {}) };
 }

@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 //      claimed after it is observed there.
 //
 // No free text: an alert is a kind, a key and a closed set of short codes. No body, no path.
-export const ALERT_KINDS = Object.freeze(["ledger_poisoned", "ledger_append_failed", "archive_failed", "archive_late_rows", "backup_failed", "retention_stopped", "retention_unprocessed", "attempt_outcome_unrecorded"]);
+export const ALERT_KINDS = Object.freeze(["ledger_poisoned", "ledger_append_failed", "archive_failed", "archive_late_rows", "backup_failed", "retention_stopped", "retention_unprocessed", "doorbell_unknown", "doorbell_not_sent", "doorbell_hook_failed", "attempt_outcome_unrecorded"]);
 const KEY = /^[a-z0-9_:.-]{1,160}$/;
 const CODE = /^[A-Za-z0-9_.:-]{1,64}$/;
 const run = promisify(execFile);
