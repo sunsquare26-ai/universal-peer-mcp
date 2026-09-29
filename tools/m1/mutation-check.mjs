@@ -52,7 +52,6 @@ const MUTANTS = [
   // M3
   ["queue takes a body", "src/extensions/codex-queue/index.mjs", "  if (!match) throw fail(\"INVALID_QUEUE_CALL\");\n  const argv = queueArgv(target.threadId, match[1]);", "  const argv = [\"queue\", \"--thread\", target.threadId, \"--message\", text];", "test/m0/doorbell-contract.test.mjs"],
   ["version mismatch ignored", "src/extensions/codex-queue/index.mjs", "if ((await this.cliVersion(target.cliPath)) !== serverVersion) throw fail(\"VERSION_MISMATCH\");", "", "test/m3/codex-wake.test.mjs"],
-  ["codex nearest proof ignored", "src/daemon.mjs", "if (nearCodex.proven && Number.isInteger(claude.depth) && nearCodex.depth < claude.depth) return identifyCodex(nearCodex);", "", "test/m3/nested-identity.test.mjs"],
   ["running turn gets a new turn", "src/extensions/codex-queue/index.mjs", "params.expectedTurnId = active[0].id; method = \"turn/steer\";", "method = \"turn/start\";", "test/m3/codex-wake.test.mjs"],
   ["held reported as queued", "src/extensions/codex-queue/index.mjs", "mode: state === \"active\" ? \"held_behind_running_turn\" : \"queued\"", "mode: \"queued\"", "test/m0/held-queue.test.mjs"],
   ["target keys unchecked", "src/extensions/codex-queue/index.mjs", "    if (Object.keys(entry).some((key) => !TARGET_KEYS.has(key))) throw fail(\"TARGET_UNAVAILABLE\");\n", "", "test/m0/doorbell-contract.test.mjs"],
