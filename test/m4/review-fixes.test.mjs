@@ -15,9 +15,8 @@ import { acceptPost } from "../../src/core/posts.mjs";
 import { sweepOrphanBodies } from "../../src/core/orphans.mjs";
 import { openStore, tempRoot } from "../m1/helpers.mjs";
 
-// The operator path is refused by design inside an agent session; run under a Codex shell, the
-// positive operator cases are skipped (the negative ones still run).
-const INSIDE_CODEX = Boolean(process.env.CODEX_THREAD_ID);
+// Operator cases run in L.detached: a process with no session ancestor (reparented to launchd), so
+// they give the same answer whether the tests run inside a Claude session, a Codex thread or neither.
 const lanes = [];
 afterEach(async () => { for (const L of lanes.splice(0)) await L.stop(); });
 async function setup() {
@@ -37,16 +36,15 @@ test("--replace, post before: the new session never sees or acks the old session
   expect((await x2.run(["inbox"])).json.events).toEqual([]);
   expect((await x2.run(["inbox-ack", "--message-id", waiting])).error).toMatchObject({ code: "NOT_RECIPIENT" });
   expect((await x2.run(["link", "--post", waiting])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
-  expect((await L.owner(["link", "--post", waiting])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
+  expect((await L.detached(["link", "--post", waiting])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
   const listed = (await L.owner(["peers"])).json;
   expect(listed.peers.find((p) => p.alias === "test-codex-1").heldForPreviousSession).toBe(1);
   expect(JSON.stringify(listed)).not.toContain("secret");
-  if (INSIDE_CODEX) return;   // the operator path is refused inside an agent session (see below)
-  expect((await L.operator(["link", "--post", waiting], `CONFIRM ${waiting}`)).json).toMatchObject({ relinked: true, recipient: "test-codex-1" });
+  expect((await L.detached(["link", "--post", waiting], `CONFIRM ${waiting}`)).json).toMatchObject({ relinked: true, recipient: "test-codex-1" });
   const box = (await x2.run(["inbox"])).json.events;
   expect(box.map((e) => [e.messageId, e.body])).toEqual([[waiting, "secret for x1"]]);
   expect((await L.owner(["peers"])).json.peers.find((p) => p.alias === "test-codex-1").heldForPreviousSession).toBeUndefined();
-});
+}, 60_000);
 
 test("--replace, replace before post: mail sent after the move is the new session's, and the old one cannot read it", async () => {
   const { L, c1, x1 } = await setup();
@@ -193,12 +191,12 @@ test("cross-session mutations are refused: dispose, link, relink, unregister of 
   expect(row.seq).toBeGreaterThan(0);
   // another session cannot dispose it, nor can a terminal without a tty
   expect((await c1.run(["body-dispose", "--seq", String(row.seq), "--disposition", "discard"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
-  expect((await L.owner(["body-dispose", "--seq", String(row.seq), "--disposition", "discard"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
+  expect((await L.detached(["body-dispose", "--seq", String(row.seq), "--disposition", "discard"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
   // the recipient session can
   expect((await x1.run(["body-dispose", "--seq", String(row.seq), "--disposition", "discard"])).json).toMatchObject({ disposition: "discard" });
   // link of an unmatched frame / relink / another alias: refused to sessions and to non-tty callers
   expect((await c1.run(["link", "--seq", "1", "--message-id", m, "--as", "ack"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
-  expect((await L.owner(["link", "--seq", "1", "--message-id", m, "--as", "ack"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
+  expect((await L.detached(["link", "--seq", "1", "--message-id", m, "--as", "ack"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
   expect((await x1.run(["unregister", "--alias", "test-claude-1"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
   // an unregistered Claude session is still a session
   const stranger = await L.claude();
@@ -211,18 +209,18 @@ test("cross-session mutations are refused: dispose, link, relink, unregister of 
   // diagnostics: metadata keeps seq, not the body file name
   const listing = await otherProcess(L, "peer_list_events", { afterSeq: 0 });
   expect(listing.events.every((e) => e.bodyFile === undefined && Number.isInteger(e.seq))).toBe(true);
-});
+}, 60_000);
 
-test.skipIf(INSIDE_CODEX)("operator(interactive-tty): the phrase typed at a terminal outside any session passes and is recorded; a wrong phrase does not", async () => {
+test("operator(interactive-tty): the phrase typed at a terminal outside any session passes and is recorded; a wrong phrase does not", async () => {
   const { L, c1, x1 } = await setup();
-  const wrong = await L.operator(["unregister", "--alias", "test-claude-1"], "CONFIRM test-codex-1");
+  const wrong = await L.detached(["unregister", "--alias", "test-claude-1"], "CONFIRM test-codex-1");
   expect(wrong.prompted).toBe(true); expect(wrong.error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "confirm_mismatch" });
-  expect((await L.operator(["unregister", "--alias", "test-claude-1"], "CONFIRM test-claude-1")).json).toEqual({ removed: true, alias: "test-claude-1", kind: "claude" });
+  expect((await L.detached(["unregister", "--alias", "test-claude-1"], "CONFIRM test-claude-1")).json).toEqual({ removed: true, alias: "test-claude-1", kind: "claude" });
   const m = await post(L, x1, "test-codex-1", "to self");
   const seq = (await x1.run(["inbox"])).json.events[0].seq;
-  expect((await L.operator(["body-dispose", "--seq", String(seq), "--disposition", "discard"], `CONFIRM ${seq}`)).json).toMatchObject({ disposition: "discard" });
+  expect((await L.detached(["body-dispose", "--seq", String(seq), "--disposition", "discard"], `CONFIRM ${seq}`)).json).toMatchObject({ disposition: "discard" });
   const actions = (await L.events()).filter((e) => e.type === "operator_action");
   expect(actions.map((e) => [e.action, e.target, e.operator])).toEqual([["unregister", "test-claude-1", "operator(interactive-tty)"], ["dispose", String(seq), "operator(interactive-tty)"]]);
   expect(actions.every((e) => /^tty/.test(e.tty))).toBe(true);
   void c1; void m;
-});
+}, 60_000);

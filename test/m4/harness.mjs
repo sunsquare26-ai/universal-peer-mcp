@@ -37,6 +37,11 @@ export async function lane() {
     async owner(argv) { return runDirect(argv, env); },
     // The operator path: the same command under a pseudo-terminal (script(1)) with a phrase typed at it.
     async operator(argv, phrase) { return runOperator(argv, env, phrase); },
+    // A process with no session ancestor: started from a shell that exits at once, so it is reparented
+    // to launchd (pid 1) and the chain up to whatever runs the tests (a Claude or Codex session) is cut;
+    // CODEX_THREAD_ID is removed from its environment. With a phrase it runs under script(1) (a pty and
+    // a controlling terminal) and the phrase is typed; without one it has no terminal at all.
+    async detached(argv, phrase = null) { return runDetached(argv, env, phrase); },
     async stop() {
       for (const s of sessionsList.splice(0)) await s.close();
       await stopDaemon(root);
@@ -119,5 +124,35 @@ async function runOperator(argv, env, phrase) {
   const start = after.indexOf("{");
   let json = null; let error = null;
   try { const parsed = JSON.parse(after.slice(start)); if (parsed && parsed.ok === false) error = parsed; else json = parsed; } catch { error = { raw: text.slice(-400) }; }
+  return { code, json, error, prompted: typed };
+}
+
+async function runDetached(argv, env, phrase) {
+  const cli = path.resolve(here, "../../src/cli.mjs");
+  const clean = { ...env }; delete clean.CODEX_THREAD_ID;
+  const dir = await fsp.realpath(await fsp.mkdtemp("/private/tmp/upm4d-"));
+  const fifo = path.join(dir, "in"); const out = path.join(dir, "out"); const rc = path.join(dir, "rc");
+  const q = (a) => `'${String(a).replace(/'/g, "'\\''")}'`;
+  const command = [process.execPath, cli, ...argv].map(q).join(" ");
+  let body;
+  if (phrase === null) body = `${command} < /dev/null > ${q(out)} 2>&1`;
+  else { execFileSync("/usr/bin/mkfifo", ["-m", "600", fifo]); body = `/bin/cat ${q(fifo)} | /usr/bin/script -q /dev/null ${command} > ${q(out)} 2>&1`; }
+  const launcher = spawn("/bin/sh", ["-c", `( ${body}; echo $? > ${q(rc)} ) < /dev/null > /dev/null 2>&1 & exit 0`], { env: clean, stdio: "ignore" });
+  await new Promise((r) => launcher.on("close", r));
+  const read = async (f) => { try { return await fsp.readFile(f, "utf8"); } catch { return null; } };
+  let writer = null; let typed = false;
+  if (phrase !== null) writer = await fsp.open(fifo, "w");
+  for (let i = 0; i < 600; i += 1) {
+    if (writer && !typed && ((await read(out)) ?? "").includes("to continue:")) { typed = true; await writer.write(`${phrase}\n`); }
+    if ((await read(rc)) !== null) break;
+    await Bun.sleep(25);
+  }
+  if (writer) await writer.close().catch(() => {});
+  const text = ((await read(out)) ?? "").replace(/\r/g, "");
+  const code = Number(((await read(rc)) ?? "").trim());
+  await fsp.rm(dir, { recursive: true, force: true });
+  const after = typed ? text.slice(text.indexOf("to continue:") + 12) : text;
+  let json = null; let error = null;
+  try { const parsed = JSON.parse(after.slice(after.indexOf("{"))); if (parsed && parsed.ok === false) error = parsed; else json = parsed; } catch { error = { raw: text.slice(-400) }; }
   return { code, json, error, prompted: typed };
 }

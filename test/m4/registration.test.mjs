@@ -28,7 +28,7 @@ test("a Claude double and a Codex double register themselves; peers lists them; 
   const owner = await L.owner(["register", "--alias", "owner-term"]);
   expect(owner.code).toBe(1); expect(owner.error).toMatchObject({ code: "SESSION_UNPROVEN" });
   // Remove: another alias only through the operator path; a session may remove its own alias.
-  expect((await L.owner(["unregister", "--alias", "test-codex-1"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
+  expect((await L.detached(["unregister", "--alias", "test-codex-1"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
   expect((await a.run(["unregister", "--alias", "test-codex-1"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
   expect((await x.run(["unregister", "--alias", "test-codex-1"])).json).toEqual({ removed: true, alias: "test-codex-1", kind: "codex" });
   expect((await x.run(["whoami"])).json).toMatchObject({ authenticated: false, kind: "codex", reason: "session_not_allowlisted" });
@@ -36,7 +36,7 @@ test("a Claude double and a Codex double register themselves; peers lists them; 
   const types = (await L.events()).map((e) => e.type);
   expect(types.filter((t) => t === "peer_registered")).toHaveLength(2);
   expect(types).toContain("peer_unregistered"); expect(types).toContain("peer_register_refused");
-});
+}, 60_000);
 
 test("one alias names one session and one session holds one alias; --replace moves either on purpose", async () => {
   const L = await open();
