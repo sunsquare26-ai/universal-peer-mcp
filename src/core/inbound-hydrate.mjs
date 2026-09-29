@@ -58,7 +58,10 @@ export async function hydrateInboundBodies(events, {
   root,
   perBody = INLINE_BODY_MAX_BYTES,
   total = INLINE_TOTAL_MAX_BYTES,
-  ceiling = INLINE_RESPONSE_CEILING_BYTES
+  ceiling = INLINE_RESPONSE_CEILING_BYTES,
+  // Body files the retention step deleted on purpose (src/core/retention.mjs). A row naming one is
+  // answered `expired`, which is a different fact from `unreadable` (a file that should be there).
+  expired = new Set()
 } = {}) {
   if (!Array.isArray(events) || events.length === 0 || typeof root !== "string" || root === "") return events;
   const carriers = [];
@@ -71,6 +74,7 @@ export async function hydrateInboundBodies(events, {
   // still carry their file name.
   for (let at = carriers.length - 1; at >= 0; at -= 1) {
     const index = carriers[at];
+    if (expired.has(events[index].bodyFile)) { hydrated[index] = { ...events[index], bodyInlineOmitted: "expired" }; continue; }
     const row = await inlineOne(events[index], root, Math.min(perBody, budget));
     hydrated[index] = row;
     if (typeof row.bodyInlineBytes === "number") budget -= row.bodyInlineBytes;

@@ -20,6 +20,14 @@ import { startReceiver, receiverOptionsForState } from "./adapters/claude-native
 import { directSend } from "./adapters/claude-native-v1/transport.mjs";
 import { MilestoneExtension } from "./extensions/milestone/index.mjs";
 import { CodeReviewExtension, publicLedgerEvent } from "./extensions/code-review/index.mjs";
+import path from "node:path";
+import { BUILD_ID } from "./core/build-identity.mjs";
+import { AlertSink } from "./core/alerts.mjs";
+import { recordAttempt } from "./core/attempts.mjs";
+import { dailyStats, traceMessage } from "./core/trace.mjs";
+import { expiredBodyFiles } from "./core/retention.mjs";
+import { maintenanceConfig, MAINTENANCE_INTERVAL_MS, runMaintenance } from "./core/maintenance.mjs";
+import { dayOf } from "./core/days.mjs";
 
 const buildObservation = observeBuild();
 const paths = statePaths(); const admin = process.env.CLAUDE_PEER_MCP_ADMIN === "1";
@@ -62,7 +70,19 @@ let targets = startupTable.table;
 // restart. What the check means is unchanged: a command still executes only against the table its
 // caller checked it against.
 let targetsDigest = startupTable.digest;
-const store = new EventStore(paths); await store.init();
+// M1 observation. One id per daemon process, written as the first row this process appends, so a
+// timeline read days later can say which daemon generation handled each part of it and where a
+// restart fell. The alarm sink is local and durable (src/core/alerts.mjs); the ledger reports its
+// own death through it, once.
+const generationId = crypto.randomUUID();
+const alertCommand = typeof process.env.UNIVERSAL_PEER_ALERT_COMMAND === "string" && path.isAbsolute(process.env.UNIVERSAL_PEER_ALERT_COMMAND) ? process.env.UNIVERSAL_PEER_ALERT_COMMAND : null;
+const alerts = new AlertSink({ file: path.join(paths.root, "alerts.jsonl"), command: alertCommand });
+const store = new EventStore(paths, { onPoisoned: (health) => alerts.raise({ kind: "ledger_poisoned", key: `ledger_poisoned:${generationId}`, code: health.lastError?.code ?? null }) });
+await store.init();
+await store.append("daemon_started", { generationId, daemonPid: process.pid, daemonProcStart: selfProcStart, buildId: BUILD_ID });
+// Which reader has already been served which body, so a read is recorded once per reader process.
+const bodyReads = new Set(store.events.filter((row) => row.type === "inbound_body_read").map((row) => `${row.sourceSeq}|${row.readerPid}|${row.readerProcStart}`));
+let maintenance = { lastRun: null, running: false };
 // The shipped daemon installs no `onCorrelatedReply` and still does not — that hook is for a
 // process that embeds PeerCore, and it only ever sees the correlated half of the traffic. The
 // spool is first-party, loads nothing, and keeps the body of every inbound frame whether or not
@@ -128,7 +148,7 @@ async function handle(socket, line) {
     // before `daemon_status`, which is the answer the caller compares its own reading against.
     await refreshTargets();
     if (REACHES_A_TARGET.has(request.method)) assertChecked(request.expect);
-    const result = await dispatch(request.method, request.args ?? {}); socket.end(`${JSON.stringify({ requestId: request.requestId, ok: true, result })}\n`);
+    const result = await dispatch(request.method, request.args ?? {}, { pid: peerPid, procStart: normalizeProcStart(request.clientProcStart) }); socket.end(`${JSON.stringify({ requestId: request.requestId, ok: true, result })}\n`);
     if (request.method === "daemon_shutdown") setImmediate(shutdown);
   } catch (error) { socket.end(`${JSON.stringify({ requestId: request?.requestId ?? null, ok: false, error: { code: typeof error?.code === "string" ? error.code : "INTERNAL_FAILURE", message: error?.message ?? "daemon request failed", diagnostic: targetDiagnostic(error?.diagnostic) } })}\n`); }
 }
@@ -173,12 +193,15 @@ async function refreshTargets() {
   }
 }
 
-async function dispatch(method, args) {
+async function dispatch(method, args, caller = null) {
   if (method === "peer_targets") return core.targetsList();
   if (method === "peer_status") return core.status(args.alias);
-  if (method === "peer_send") return withInlineBodies(await core.send(publicSendArgs(args)));
-  if (method === "peer_wait") return withInlineBodies(await core.wait(args));
-  if (method === "peer_list_events") { const listing = core.events(args); return withInlineBodies({ ...listing, events: listing.events.map(publicLedgerEvent) }); }
+  if (method === "peer_send") return withInlineBodies(await core.send(publicSendArgs(args)), caller, method);
+  if (method === "peer_wait") return withInlineBodies(await core.wait(args), caller, method);
+  if (method === "peer_list_events") { const listing = core.events(args); return withInlineBodies({ ...listing, events: listing.events.map(publicLedgerEvent) }, caller, method); }
+  if (method === "trace_attempt") return recordAttempt(store, args);
+  if (method === "trace_message") { if (typeof args.messageId !== "string" || !/^[0-9a-f-]{36}$/i.test(args.messageId)) throw Object.assign(new Error("messageId must be a uuid"), { code: "INVALID_CONTROL_ARGUMENTS" }); return traceMessage(store.events, args.messageId); }
+  if (method === "ledger_daily_stats") { const days = Number.isInteger(args.days) && args.days > 0 && args.days <= 400 ? args.days : 30; return { days: dailyStats(store.events, { sinceDay: dayOf(Date.now() - (days - 1) * 86_400_000) }) }; }
   if (method === "milestone_status" && milestone) return milestone.status(args);
   if (method === "milestone_list" && milestone) return milestone.list(args);
   if (method === "milestone_wait" && milestone) return milestone.wait(args);
@@ -187,7 +210,7 @@ async function dispatch(method, args) {
   if (method === "code_review_list" && codeReview) return codeReview.list(args);
   if (method === "code_review_wait" && codeReview) return codeReview.wait(args);
   if (method === "code_review_request" && codeReview) return codeReview.request(args);
-  if (method === "daemon_status") return { daemonBuild: buildObservation(), running: true, pid: process.pid, procStart: identity.procStart, admin, enabledExtensions, eventSeq: store.events.at(-1)?.seq ?? 0, targetCount: Object.keys(targets).length, targetsDigest };
+  if (method === "daemon_status") return { daemonBuild: buildObservation(), running: true, pid: process.pid, procStart: identity.procStart, admin, enabledExtensions, eventSeq: store.events.at(-1)?.seq ?? 0, targetCount: Object.keys(targets).length, targetsDigest, generationId, ledger: store.health(), maintenance: { lastRun: maintenance.lastRun, running: maintenance.running }, alerts: alerts.status() };
   if (method === "daemon_shutdown" && admin) return { shuttingDown: true };
   throw new Error("unknown or unavailable daemon method");
 }
@@ -201,16 +224,43 @@ async function dispatch(method, args) {
 // `peer_wait` answers with one row under `event` as well as the listing it came from. It is the same
 // row, so it is replaced with the hydrated copy rather than left as the one row in the answer whose
 // body is missing.
-async function withInlineBodies(result) {
+async function withInlineBodies(result, caller = null, method = null) {
   if (!result || !Array.isArray(result.events)) return result;
-  const events = await hydrateInboundBodies(result.events, { root: paths.root });
+  const events = await hydrateInboundBodies(result.events, { root: paths.root, expired: expiredBodyFiles(store.events) });
+  await recordBodyReads(events, caller, method);
   if (!result.event || typeof result.event.seq !== "number") return { ...result, events };
   const hydrated = events.find((row) => row.seq === result.event.seq);
   return { ...result, ...(hydrated ? { event: hydrated } : {}), events };
 }
 
+// "Receiver read" for M1: a body handed out inline to a caller process is a read by that process.
+// Recorded once per (row, reader process); never fails the read that triggered it.
+async function recordBodyReads(rows, caller, method) {
+  if (!caller || !Number.isInteger(caller.pid)) return;
+  let written = 0;
+  for (const row of rows) {
+    if (typeof row.body !== "string" || !Number.isInteger(row.seq)) continue;
+    const key = `${row.seq}|${caller.pid}|${caller.procStart}`;
+    if (bodyReads.has(key)) continue;
+    if (written >= 50) break;
+    bodyReads.add(key); written += 1;
+    await store.append("inbound_body_read", { sourceSeq: row.seq, ...(typeof row.messageId === "string" ? { messageId: row.messageId } : {}), ...(typeof row.bodySha256 === "string" ? { bodySha256: row.bodySha256 } : {}), readerPid: caller.pid, readerProcStart: caller.procStart, method }).catch(() => {});
+  }
+}
+
+async function maintain() {
+  if (maintenance.running || closing) return;
+  maintenance.running = true;
+  try { const report = await runMaintenance({ root: paths.root, store, alerts, config: maintenanceConfig() }); maintenance.lastRun = { at: report.at, archived: report.archived.length, late: report.late.length, expired: report.expiry?.expired ?? 0, backup: report.backup?.configured ? (report.backup.error ?? "ok") : "not_configured", errors: report.errors.map((e) => `${e.step}:${e.code}`) }; }
+  catch (error) { maintenance.lastRun = { at: new Date().toISOString(), errors: [`maintenance:${typeof error?.code === "string" ? error.code : "FAILED"}`] }; }
+  finally { maintenance.running = false; }
+}
+setTimeout(maintain, Number(process.env.UNIVERSAL_PEER_MAINTENANCE_DELAY_MS ?? 60_000)).unref();
+setInterval(maintain, MAINTENANCE_INTERVAL_MS).unref();
+
 async function shutdown() {
   if (closing) return; closing = true;
+  await store.append("daemon_stopping", { generationId }).catch(() => {});
   const problems = await shutdownResources({ server, controlSockets, receiver, store, daemonLock, paths });
   for (const problem of problems) process.stderr.write(`shutdown incomplete: ${/^[A-Z0-9_]{1,64}$/.test(problem.reason?.code ?? "") ? problem.reason.code : "INTERNAL_FAILURE"}\n`);
   process.exit(problems.length > 0 ? 1 : 0);

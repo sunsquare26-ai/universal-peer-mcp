@@ -335,14 +335,14 @@ export class PeerCore extends EventEmitter {
       // about the session that is there, and looking at another session answers none of them.
       if (diagnostic === "no_live_session_for_session_id" && alias !== null && this.rebind) {
         try { return await this.rebind({ alias, expected, options: this.resolverOptions }); }
-        catch (rebound) { throw await this.#unavailable(alias, rebindReason(rebound, diagnostic)); }
+        catch (rebound) { throw await this.#unavailable(alias, rebindReason(rebound, diagnostic), rebound?.rebindFailedSeq); }
       }
       throw await this.#unavailable(alias, diagnostic);
     }
   }
 
-  async #unavailable(alias, diagnostic) {
-    await this.store.append("target_resolve_failed", { ...(alias === null ? {} : { alias }), reason: diagnostic })
+  async #unavailable(alias, diagnostic, rebindFailedSeq = null) {
+    await this.store.append("target_resolve_failed", { ...(alias === null ? {} : { alias }), reason: diagnostic, ...(Number.isInteger(rebindFailedSeq) ? { rebindFailedSeq } : {}) })
       .then((event) => this.emit("event", event)).catch(() => {});
     return Object.assign(codedError("TARGET_UNAVAILABLE", "target is unavailable"), { diagnostic });
   }

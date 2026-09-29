@@ -4,7 +4,29 @@ import { MAX_EVENT_BYTES, referenceMatches, sameUuid } from "./limits.mjs";
 import { assertPrivateFile, ensurePrivateDirectory } from "./state-paths.mjs";
 
 export class EventStore {
-  constructor(paths) { this.paths = paths; this.events = []; this.chain = Promise.resolve(); this.poisoned = null; }
+  // `onPoisoned` is called once, the first time an append fails, with the same record `health()`
+  // returns. Before this, a failed append poisoned the store and most diagnostic writers swallowed
+  // the error (`.catch(() => {})`), so "nothing was recorded" and "the ledger is dead" read the same.
+  constructor(paths, { onPoisoned = null } = {}) {
+    this.paths = paths; this.events = []; this.chain = Promise.resolve(); this.poisoned = null;
+    this.onPoisoned = onPoisoned; this.lastAppendAt = null; this.lastError = null;
+  }
+
+  // What `daemon_status` publishes about the ledger. No message text: an error message can carry a
+  // path, so only the code and the time are kept.
+  health() {
+    return {
+      poisoned: this.poisoned !== null,
+      lastSeq: this.events.at(-1)?.seq ?? 0,
+      lastAppendAt: this.lastAppendAt,
+      lastError: this.lastError
+    };
+  }
+
+  #failed(error) {
+    const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "APPEND_FAILED";
+    this.lastError = { code, at: new Date().toISOString() };
+  }
 
   async init() {
     await ensurePrivateDirectory(this.paths.root);
@@ -65,6 +87,19 @@ export class EventStore {
     return operation;
   }
 
+  // Append unless `conflict(events)` names a reason not to, decided inside the write chain so two
+  // concurrent callers cannot both pass the check. Used by trace_attempt (src/core/attempts.mjs).
+  appendChecked(type, data, conflict) {
+    const operation = this.chain.then(async () => {
+      if (this.poisoned) throw this.poisoned;
+      const refusal = conflict(this.events);
+      if (refusal) throw refusal;
+      return this.#write(type, data);
+    });
+    this.chain = operation.catch(() => {});
+    return operation;
+  }
+
   list({ afterSeq = 0, messageId = null } = {}) {
     if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new Error("afterSeq must be a non-negative integer");
     if (messageId) this.request(messageId); // refuse ambiguous historical case collisions on waits/replays too
@@ -109,12 +144,17 @@ export class EventStore {
     if (this.poisoned) throw this.poisoned;
     const event = { seq: this.events.length + 1, type, at: new Date().toISOString(), ...data };
     const line = `${JSON.stringify(event)}\n`;
-    if (Buffer.byteLength(line) > MAX_EVENT_BYTES) throw Object.assign(new Error("event exceeds 64 KiB"), { code: "EVENT_TOO_LARGE" });
+    if (Buffer.byteLength(line) > MAX_EVENT_BYTES) { const error = Object.assign(new Error("event exceeds 64 KiB"), { code: "EVENT_TOO_LARGE" }); this.#failed(error); throw error; }
     try {
       const handle = await fsp.open(this.paths.events, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW);
       try { await handle.writeFile(line); await handle.sync(); } finally { await handle.close(); }
-    } catch (error) { this.poisoned = error; throw error; }
-    this.events.push(event);
+    } catch (error) {
+      const first = this.poisoned === null;
+      this.poisoned = error; this.#failed(error);
+      if (first && typeof this.onPoisoned === "function") { try { await this.onPoisoned(this.health()); } catch {} }
+      throw error;
+    }
+    this.events.push(event); this.lastAppendAt = event.at;
     return event;
   }
 }

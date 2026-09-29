@@ -95,13 +95,13 @@ export function createSessionRebinder({
       // The switch could not be read, so whether the operator turned succession off is unknown, and
       // an unknown switch is treated as off. Nothing is redirected on a guess about permission.
       const message = `the succession switch beside the target table could not be read (${error?.code ?? error?.message ?? "unknown"}); refusing to redirect alias ${alias}`;
-      await record(store, "target_rebind_failed", { alias, expectedSessionId: expected.sessionId, reason: "rebind_disabled", candidateCount: 0, recovery: message });
-      throw Object.assign(new Error(message), { diagnostic: "rebind_disabled" });
+      const row = await record(store, "target_rebind_failed", { alias, expectedSessionId: expected.sessionId, reason: "rebind_disabled", candidateCount: 0, recovery: message });
+      throw Object.assign(new Error(message), { diagnostic: "rebind_disabled", ...linked(row) });
     }
     if (chosen === "off") {
       const message = `succession is switched off for this state directory (rebind: "off"); alias ${alias} still names session ${expected.sessionId}, which is not live`;
-      await record(store, "target_rebind_failed", { alias, expectedSessionId: expected.sessionId, reason: "rebind_disabled", candidateCount: 0, rebind: chosen, recovery: message });
-      throw Object.assign(new Error(message), { diagnostic: "rebind_disabled" });
+      const row = await record(store, "target_rebind_failed", { alias, expectedSessionId: expected.sessionId, reason: "rebind_disabled", candidateCount: 0, rebind: chosen, recovery: message });
+      throw Object.assign(new Error(message), { diagnostic: "rebind_disabled", ...linked(row) });
     }
     let found;
     try { found = await resolveSuccessor(expected, options); }
@@ -111,13 +111,14 @@ export function createSessionRebinder({
       // exactly as it is, so the caller names it with the same list every other resolver failure is
       // named from.
       const reason = targetDiagnostic(error?.diagnostic) ?? "unrecognised_resolver_failure";
-      await record(store, "target_rebind_failed", {
+      const row = await record(store, "target_rebind_failed", {
         alias, expectedSessionId: expected.sessionId, reason, rebind: chosen,
         candidateCount: Number.isInteger(error?.candidateCount) ? error.candidateCount : 0,
         ...(typeof error?.cwdCheck === "string" ? { cwdCheck: error.cwdCheck } : {}),
         ...(Array.isArray(error?.liveCandidates) ? { liveCandidates: error.liveCandidates } : {}),
         recovery: typeof error?.message === "string" ? error.message : "target could not be resolved"
       });
+      if (row && error && typeof error === "object") error.rebindFailedSeq = row.seq;
       throw error;
     }
     // The table is rewritten before the row is written, so a ledger line that says a succession
@@ -128,12 +129,12 @@ export function createSessionRebinder({
     try { written = await writeSessionId(targetsFile, alias, found.target.sessionId, { maxPrevious }); }
     catch (error) {
       const message = `alias ${alias} has a proven successor (${found.target.sessionId}) and the target table could not be rewritten (${error?.code ?? error?.message ?? "unknown"}); the alias still names ${expected.sessionId}`;
-      await record(store, "target_rebind_failed", {
+      const row = await record(store, "target_rebind_failed", {
         alias, expectedSessionId: expected.sessionId, observedSessionId: found.target.sessionId,
         reason: "rebind_write_failed", rebind: chosen, candidateCount: found.evidence.candidateCount,
         cwdCheck: found.evidence.cwdCheck, proof: found.evidence.proof, recovery: message
       });
-      throw Object.assign(new Error(message), { diagnostic: "rebind_write_failed" });
+      throw Object.assign(new Error(message), { diagnostic: "rebind_write_failed", ...linked(row) });
     }
     // The history lives beside the table and is a record, not a routing fact. Failing to write it
     // does not undo a succession that has already landed, so it is reported on the row rather than
@@ -161,6 +162,10 @@ export function createSessionRebinder({
 // A diagnosis is worth less than the thing it diagnoses. A ledger that cannot be appended to is
 // already reported by every other writer on this path, and losing the original failure to it would
 // leave the caller with nothing at all.
+// The seq of the rebind row travels with the error, so the `target_resolve_failed` row the caller
+// writes for the same failure can name it and the daily count sees one failure, not two.
+function linked(row) { return Number.isInteger(row?.seq) ? { rebindFailedSeq: row.seq } : {}; }
+
 async function record(store, type, data) {
   try { return await store?.append(type, data); } catch { return null; }
 }
