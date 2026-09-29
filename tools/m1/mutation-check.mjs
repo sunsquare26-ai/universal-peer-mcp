@@ -123,10 +123,23 @@ const MUTANTS = [
 
 const root = process.cwd();
 const results = [];
+// Baseline: every test file a mutant is judged by must be green on the unmutated copy, or a red
+// result would say nothing about the mutant (e.g. a missing node_modules failing an e2e stub).
+{
+  const copy = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "upm-baseline-"));
+  try {
+    for (const dir of ["src", "test", "tools", "package.json", "node_modules"]) if (fs.existsSync(path.join(root, dir))) execFileSync("cp", ["-R", path.join(root, dir), copy]);
+    for (const file of [...new Set(MUTANTS.map((m) => m[4]))]) {
+      const run = spawnSync(process.execPath, ["test", file], { cwd: copy, encoding: "utf8", env: { ...process.env, UNIVERSAL_PEER_MAINTENANCE_DELAY_MS: "3600000" } });
+      if (run.status !== 0) { console.log(`BASELINE RED ${file}`); process.exitCode = 1; }
+    }
+  } finally { fs.rmSync(copy, { recursive: true, force: true }); }
+  if (process.exitCode === 1) process.exit(1);
+}
 for (const [name, file, find, replace, testFile] of MUTANTS) {
   const copy = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "upm-mutant-"));
   try {
-    for (const dir of ["src", "test", "tools", "package.json"]) execFileSync("cp", ["-R", path.join(root, dir), copy]);
+    for (const dir of ["src", "test", "tools", "package.json", "node_modules"]) if (fs.existsSync(path.join(root, dir))) execFileSync("cp", ["-R", path.join(root, dir), copy]);
     const target = path.join(copy, file); const text = fs.readFileSync(target, "utf8");
     const count = text.split(find).length - 1;
     if (count !== 1) { results.push({ name, status: `SETUP: pattern found ${count} times` }); continue; }
