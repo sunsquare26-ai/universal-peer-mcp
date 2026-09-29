@@ -25,6 +25,8 @@ export async function enqueueCodex(target, text, ...extra) {
 
 // Version check (M3): the CLI that queues and the app-server that owns the thread must be the same
 // release. A mismatch (measured 2026-09-29: CLI 0.157.0, app-server 0.159.0) stops the send.
+async function privateSocket(p) { try { const st = await fsp.lstat(p); return st.isSocket() && !st.isSymbolicLink() && st.uid === process.getuid() && (st.mode & 0o077) === 0; } catch { return false; } }
+async function privateBinary(p) { try { const st = await fsp.stat(p); return st.isFile() && [0, process.getuid()].includes(st.uid) && (st.mode & 0o022) === 0 && (st.mode & 0o111) !== 0; } catch { return false; } }
 export function versionOf(text) { const m = /(\d+\.\d+\.\d+)/.exec(typeof text === "string" ? text : ""); return m ? m[1] : null; }
 export async function cliVersion(cliPath) { const { stdout } = await runFile(cliPath, ["--version"], { timeout: 10000, maxBuffer: 4096 }); return versionOf(stdout); }
 
@@ -108,12 +110,10 @@ export class CodexWake {
       return entry;
     }
     if (entry.transport !== undefined && entry.transport !== "existing-app-server") throw fail("TARGET_UNAVAILABLE");
-    // The Codex CLI beside the app-server: its release is checked against the server's (inspect).
-    if (!path.isAbsolute(entry.cliPath ?? "")) throw fail("TARGET_UNAVAILABLE");
-    { const cli = await fsp.stat(entry.cliPath); if (!cli.isFile() || (cli.mode & 0o022) !== 0 || ![0, process.getuid()].includes(cli.uid)) throw fail("TARGET_UNAVAILABLE"); }
-    if (!path.isAbsolute(entry.socketPath ?? "")) throw fail("TARGET_UNAVAILABLE");
-    const stat = await fsp.lstat(entry.socketPath);
-    if (!stat.isSocket() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) throw fail("TARGET_UNAVAILABLE");
+    // Shape only here. The configured CLI and socket are the first candidates, not preconditions: an
+    // update can remove the old release or socket, and the search must still find the new ones
+    // (inspect checks owner and mode of every candidate it actually uses).
+    if (!path.isAbsolute(entry.cliPath ?? "") || !path.isAbsolute(entry.socketPath ?? "")) throw fail("TARGET_UNAVAILABLE");
     return entry;
   }
   // Which app-server holds the thread: the target's socket first, then any other socket the caller
@@ -122,39 +122,50 @@ export class CodexWake {
   async inspect(alias, action, given = null) {
     const target = await this.target(alias, given);
     const candidates = [target.socketPath, ...((await this.sockets?.()) ?? [])].filter((p, i, a) => typeof p === "string" && a.indexOf(p) === i);
-    let lastError = fail("TARGET_UNAVAILABLE");
     for (const socketPath of candidates) {
+      // A candidate that is missing, not a private socket of this user, dead, fails to initialize or
+      // does not list the thread is skipped. Once a server lists the thread, its answer is final.
+      if (!(await privateSocket(socketPath))) continue;
       try { return await this.#inspectOn({ ...target, socketPath }, action); }
-      catch (error) { if (error?.code !== "THREAD_NOT_HERE") throw error; lastError = fail("TARGET_UNAVAILABLE"); }
+      catch (error) { if (!error?.skipCandidate) throw error; }
     }
-    throw lastError;
+    throw fail("TARGET_UNAVAILABLE");
   }
 
   async #inspectOn(target, action) {
     const rpc = this.connect(target.socketPath);
+    const skip = () => Object.assign(fail("THREAD_NOT_HERE"), { skipCandidate: true });
     try {
-      const init = await rpc.call("initialize", { clientInfo: { name: "universal-peer-mcp", version: "0.1.0" }, capabilities: { experimentalApi: true } });
+      let init;
+      try { init = await rpc.call("initialize", { clientInfo: { name: "universal-peer-mcp", version: "0.1.0" }, capabilities: { experimentalApi: true } }); }
+      catch { throw skip(); }
+      rpc.notify("initialized");
+      // Ownership first: this server must list the thread as loaded; otherwise try the next one.
+      let loaded = false;
+      try {
+        let cursor = null;
+        for (let n = 0; n < 128; n++) {
+          const result = await rpc.call("thread/loaded/list", { cursor, limit: 100 });
+          if (result.data?.includes(target.threadId)) { loaded = true; break; }
+          cursor = result.nextCursor; if (!cursor) break;
+        }
+      } catch { throw skip(); }
+      if (!loaded) throw skip();
       const serverVersion = versionOf(init?.userAgent);
       if (!serverVersion) throw fail("VERSION_UNKNOWN");
       // The release follows the server (it updates itself): the CLI used with it is chosen now, for
       // the version the server just reported — the configured one if it matches, otherwise the one
       // `cliFor(version)` finds (e.g. the daemon's own releases directory). No match: not sent.
+      // Every CLI used (configured or found) must be this user's (or root's) regular file that no one
+      // else can write, and report the server's release.
       let cliPath = target.cliPath;
-      if ((await this.cliVersion(cliPath).catch(() => null)) !== serverVersion) {
+      if (!(await privateBinary(cliPath)) || (await this.cliVersion(cliPath).catch(() => null)) !== serverVersion) {
         cliPath = (await this.cliFor?.(serverVersion)) ?? null;
-        if (!cliPath || (await this.cliVersion(cliPath).catch(() => null)) !== serverVersion) throw fail("VERSION_MISMATCH");
+        if (!cliPath || !(await privateBinary(cliPath)) || (await this.cliVersion(cliPath).catch(() => null)) !== serverVersion) throw fail("VERSION_MISMATCH");
       }
       target = { ...target, cliPath };
-      rpc.notify("initialized");
-      // thread/read alone can read a persisted but unloaded thread. Never load it
-      // into a different server: verify ownership in this server's loaded list.
-      let cursor = null; let loaded = false;
-      for (let n = 0; n < 128; n++) {
-        const result = await rpc.call("thread/loaded/list", { cursor, limit: 100 });
-        if (result.data?.includes(target.threadId)) { loaded = true; break; }
-        cursor = result.nextCursor; if (!cursor) break;
-      }
-      if (!loaded) throw fail("THREAD_NOT_HERE");
+      // thread/read alone can read a persisted but unloaded thread; ownership was proven above from
+      // this server's loaded list, and nothing is ever loaded into a server.
       // Metadata only. `includeTurns: true` hydrates the whole rollout: 38,490,010 bytes for the live
       // codex-main thread (386 turns, measured 2026-09-29 23:3x KST), past the transport's 8 MiB frame
       // bound, so the socket closed ("Max payload size exceeded") and every running-turn doorbell fell

@@ -31,7 +31,14 @@ export function fakeConnect({ root, state = "idle", version = VERSION, threadId 
   });
 }
 
+// The adapter only uses a candidate socket that is a private unix socket of this user (M3), so the
+// fixture puts a real one at the target's socketPath (the connection itself is faked).
+import net from "node:net";
 export async function writeTargets(root, entry) {
+  if (typeof entry.socketPath === "string") {
+    const exists = await fs.lstat(entry.socketPath).then(() => true, () => false);
+    if (!exists) { const server = net.createServer(() => {}); await new Promise((ok) => server.listen(entry.socketPath, ok)); await fs.chmod(entry.socketPath, 0o600); server.unref(); }
+  }
   await fs.writeFile(path.join(root, "codex-targets.json"), JSON.stringify({ "codex-main": entry }), { mode: 0o600 });
 }
 export const queueTarget = (root, cli, extra = {}) => ({ transport: "cli-queue", cliPath: cli, threadId: THREAD_UUID, cwd: root, socketPath: path.join(root, "app-server.sock"), ...extra });

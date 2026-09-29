@@ -20,7 +20,7 @@ test("CLI 0.157.0 against app-server 0.159.0 (the live mismatch) is refused befo
 
 test("an app-server that does not state its release is refused", async () => {
   const r = await root(); const cli = await writeCli(r); await writeTargets(r, queueTarget(r, cli));
-  const connect = () => ({ call: async (m) => (m === "initialize" ? {} : {}), notify() {}, close() {} });
+  const connect = () => ({ call: async (m) => (m === "thread/loaded/list" ? { data: [THREAD_UUID] } : {}), notify() {}, close() {} });   // lists the thread, states no release
   await expect(new CodexWake({ root: r, connect }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "VERSION_UNKNOWN" });
 });
 
@@ -112,4 +112,49 @@ test("an app-server target whose proxy CLI is another release is refused", async
   try {
     await expect(new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.160.0" }) }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
   } finally { server.close(); }
+});
+
+async function sockets(r, names, mode = 0o600) {
+  const net = await import("node:net"); const servers = [];
+  for (const n of names) { const s = net.createServer(() => {}); await new Promise((ok) => s.listen(path.join(r, n), ok)); await fs.chmod(path.join(r, n), mode); servers.push(s); }
+  return () => servers.forEach((s) => s.close());
+}
+// A connection that answers like a server holding (or not holding) the thread, or is dead.
+const serverAt = (r, holders, dead = []) => (sock) => {
+  const name = path.basename(sock);
+  if (dead.includes(name)) return { call: async () => { throw Object.assign(new Error("closed"), { code: "TARGET_UNAVAILABLE" }); }, notify() {}, close() {} };
+  const base = fakeConnect({ root: r, version: "0.159.1" })();
+  return { ...base, call: async (m, p) => (m === "thread/loaded/list" ? { data: holders.includes(name) ? [THREAD_UUID] : [] } : base.call(m, p)) };
+};
+
+test("after an update removed the configured socket: the new socket that lists the thread is found", async () => {
+  const r = await root(); const cli = await writeCli(r, { version: "0.159.1" }); const close = await sockets(r, ["new.sock"]);
+  await writeTargets(r, { transport: "existing-app-server", cliPath: cli, threadId: THREAD_UUID, socketPath: path.join(r, "gone.sock") });
+  try {
+    const wake = new CodexWake({ root: r, connect: serverAt(r, ["new.sock"]), sockets: () => [path.join(r, "new.sock")] });
+    expect(await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).toMatchObject({ mode: "started" });
+  } finally { close(); }
+});
+
+test("after an update removed the configured CLI: the server's release is found and used", async () => {
+  const r = await root(); const close = await sockets(r, ["s.sock"]);
+  const bin = path.join(r, "rel", "0.159.1-x", "bin"); await fs.mkdir(bin, { recursive: true }); const fresh = await writeCli(bin, { version: "0.159.1" });
+  await writeTargets(r, { transport: "existing-app-server", cliPath: path.join(r, "releases-0.159.0-deleted", "codex"), threadId: THREAD_UUID, socketPath: path.join(r, "s.sock") });
+  try {
+    const wake = new CodexWake({ root: r, connect: serverAt(r, ["s.sock"]), cliFor: (v) => (v === "0.159.1" ? fresh : null) });
+    expect(await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).toMatchObject({ mode: "started" });
+  } finally { close(); }
+});
+
+test("a dead socket and a foreign-mode socket are skipped; the live one that lists the thread answers", async () => {
+  const r = await root(); const cli = await writeCli(r, { version: "0.159.1" });
+  const closeA = await sockets(r, ["dead.sock", "live.sock"]); const closeB = await sockets(r, ["open.sock"], 0o666);
+  await writeTargets(r, { transport: "existing-app-server", cliPath: cli, threadId: THREAD_UUID, socketPath: path.join(r, "dead.sock") });
+  const tried = [];
+  const connect = (sock) => { tried.push(path.basename(sock)); return serverAt(r, ["live.sock", "open.sock"], ["dead.sock"])(sock); };
+  try {
+    const wake = new CodexWake({ root: r, connect, sockets: () => [path.join(r, "open.sock"), path.join(r, "live.sock")] });
+    expect(await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).toMatchObject({ mode: "started" });
+    expect(tried).toEqual(["dead.sock", "live.sock"]);               // open.sock (0666) never connected
+  } finally { closeA(); closeB(); }
 });

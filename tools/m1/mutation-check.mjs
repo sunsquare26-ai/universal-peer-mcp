@@ -73,6 +73,9 @@ const MUTANTS = [
   ["running turn id not looked up", "src/extensions/codex-queue/index.mjs", "if (newest?.status === \"inProgress\" && typeof newest.id === \"string\" && newest.id) activeTurnId = newest.id;", "void newest;", "test/m3/doorbell-e2e.test.mjs"],
   ["late queued doorbell not marked stale", "src/core/doorbell-service.mjs", "if (out?.state === \"held\" && !this.store.events.some", "if (false && !this.store.events.some", "test/m3/doorbell-e2e.test.mjs"],
   ["inbox hides already_processed", "src/daemon.mjs", ": done ? \"already_processed\" :", ": done ? \"pending\" :", "test/m3/doorbell-e2e.test.mjs"],
+  ["fixed socket is a precondition again", "src/extensions/codex-queue/index.mjs", "if (!path.isAbsolute(entry.cliPath ?? \"\") || !path.isAbsolute(entry.socketPath ?? \"\")) throw fail(\"TARGET_UNAVAILABLE\");\n    return entry;", "if (!path.isAbsolute(entry.cliPath ?? \"\") || !path.isAbsolute(entry.socketPath ?? \"\")) throw fail(\"TARGET_UNAVAILABLE\");\n    await fsp.stat(entry.cliPath); await fsp.lstat(entry.socketPath);\n    return entry;", "test/m3/codex-wake.test.mjs"],
+  ["dead candidate stops the search", "src/extensions/codex-queue/index.mjs", "catch { throw skip(); }\n      rpc.notify(\"initialized\");", "catch { throw fail(\"TARGET_UNAVAILABLE\"); }\n      rpc.notify(\"initialized\");", "test/m3/codex-wake.test.mjs"],
+  ["foreign-mode socket used", "src/extensions/codex-queue/index.mjs", "if (!(await privateSocket(socketPath))) continue;", "", "test/m3/codex-wake.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
   ,
   // M4
