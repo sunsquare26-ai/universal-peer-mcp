@@ -63,10 +63,13 @@ for await (const line of rl) {
   if (!line.trim()) continue;
   const cmd = JSON.parse(line);
   if (cmd.exit) { server?.close(); cleanup(); process.exit(0); }
-  const child = spawn(bun, [cli, ...cmd.argv], { env, stdio: ["ignore", "pipe", "pipe"] });
+  // A Codex host runs many threads in one process: a command may name its own thread.
+  const child = spawn(bun, [cli, ...cmd.argv], { env: cmd.thread ? { ...env, CODEX_THREAD_ID: cmd.thread } : env, stdio: ["ignore", "pipe", "pipe"] });
   running.add(child); child.on("exit", () => running.delete(child));
   let out = ""; let err = "";
   child.stdout.on("data", (d) => { out += d; }); child.stderr.on("data", (d) => { err += d; });
   child.on("close", (code) => process.stdout.write(`${JSON.stringify({ id: cmd.id, code, stdout: out, stderr: err })}\n`));
 }
+  // stdin closed: the test process is gone; do not outlive it.
+  server?.close(); cleanup(); process.exit(0);
 }

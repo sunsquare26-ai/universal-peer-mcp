@@ -74,18 +74,24 @@ const MUTANTS = [
   // M4 review fixes
   ["new holder reads the old session's mail", "src/daemon.mjs", ", lineage: lineageOf(who) }) }, caller, \"peer_inbox\");", ", lineage: null }) }, caller, \"peer_inbox\");", "test/m4/review-fixes.test.mjs"],
   ["new holder acks the old session's mail", "src/daemon.mjs", "if (row && inbox(store.events, who.alias, { lineage: lineageOf(who) })", "if (false && row && inbox(store.events, who.alias, { lineage: lineageOf(who) })", "test/m4/review-fixes.test.mjs"],
-  ["a session relinks mail to itself", "src/daemon.mjs", "if (who.authenticated) throw Object.assign(new Error(\"only the Owner's", "if (false) throw Object.assign(new Error(\"only the Owner's", "test/m4/review-fixes.test.mjs"],
   ["resume does not inherit", "src/core/posts.mjs", "{ lineage.add(`claude:${from}`); grew = true; }", "{ grew = false; }", "test/m4/review-fixes.test.mjs"],
   ["frame post unbound", "src/core/peer-core.mjs", "...(recipient !== \"*\" ? this.postRecipientFields?.(recipient) ?? {} : {})", "...{}", "test/m4/units.test.mjs"],
   ["diagnostics hand out every body", "src/daemon.mjs", "const open = method === \"peer_inbox\" || settings[LEGACY_BODIES].value;", "const open = true;", "test/m4/review-fixes.test.mjs"],
-  ["any process gets the reply body", "src/daemon.mjs", "return Boolean(asked) && asked.requesterPid === caller.pid", "return Boolean(asked) || asked.requesterPid === caller.pid", "test/m4/review-fixes.test.mjs"],
-  ["requester not recorded", "src/daemon.mjs", "await recordRequester(sent?.messageId ?? args.messageId, caller); ", "", "test/m4/review-fixes.test.mjs"],
   ["compatibility window on by default", "src/core/settings.mjs", "value: !invalid && fromFile?.[LEGACY_BODIES] === true,", "value: !invalid && fromFile?.[LEGACY_BODIES] !== false,", "test/m4/review-fixes.test.mjs"],
   ["failed post leaves its body file", "src/core/posts.mjs", "    if (spooled.bodyFile) await discardSpooled(", "    if (false) await discardSpooled(", "test/m2/posts.test.mjs"],
   ["orphans deleted, not kept", "src/core/orphans.mjs", "await fsp.rename(file, path.join(target, name));", "await fsp.unlink(file);", "test/m4/review-fixes.test.mjs"],
   ["referenced bodies swept", "src/core/orphans.mjs", "if (!NAME.test(name) || referenced.has(`${INBOUND_DIRNAME}/${name}`)) continue;", "if (!NAME.test(name)) continue;", "test/m4/review-fixes.test.mjs"],
   ["nesting decided by the variable, not the host", "src/daemon.mjs", "codex.hostDepth < claude.depth", "codex.depth < claude.depth", "test/m4/registration.test.mjs"],
-  ["Claude always wins a nesting", "src/daemon.mjs", "if (codex.proven && (!Number.isInteger(claude.depth) || codex.hostDepth < claude.depth)) return codexCaller(codex);", "", "test/m4/registration.test.mjs"]
+  ["Claude always wins a nesting", "src/daemon.mjs", "if (codex.proven && (!Number.isInteger(claude.depth) || codex.hostDepth < claude.depth)) return codexCaller(codex);", "", "test/m4/registration.test.mjs"],
+  ["reply bodies exempt from the diagnostics rule", "src/daemon.mjs", "    if (typeof row?.bodyFile !== \"string\") return row;", "    if (typeof row?.bodyFile !== \"string\" || [\"peer_ack\", \"peer_reply\"].includes(row.type)) return row;", "test/m4/review-fixes.test.mjs"],
+  ["answer goes to whoever holds the alias now", "src/daemon.mjs", "who: { ...who, ...binding, replyTo }", "who: { ...who, ...recipientFieldsOf(resolvePeer(to, { claude: targets, codex: codexPeers })), replyTo }", "test/m4/review-fixes.test.mjs"],
+  ["anyone may answer a post", "src/daemon.mjs", "if (!readable) {", "if (false) {", "test/m4/review-fixes.test.mjs"],
+  ["operator check skips sessions", "src/daemon.mjs", "if (who.kind !== null && who.kind !== undefined) return refuse(\"inside_session\");", "", "test/m4/review-fixes.test.mjs"],
+  ["operator check skips the tty", "src/daemon.mjs", "if (!tty) return refuse(\"no_tty\");", "", "test/m4/review-fixes.test.mjs"],
+  ["operator phrase not checked", "src/daemon.mjs", "if (args?.operator?.confirm !== operatorPhrase(target)) return refuse(\"confirm_mismatch\");", "", "test/m4/review-fixes.test.mjs"],
+  ["dispose of another's body allowed", "src/daemon.mjs", "if (!(await ownsBody(caller, args.sourceSeq))) await requireOperator(", "if (false) await requireOperator(", "test/m4/review-fixes.test.mjs"],
+  ["session removes another alias", "src/daemon.mjs", "if (!(who.authenticated && who.alias === args.alias)) await requireOperator(", "if (!who.authenticated && false) await requireOperator(", "test/m4/registration.test.mjs"],
+  ["diagnostics keep the body file name", "src/daemon.mjs", "withheld.add(index); const { bodyFile, ...rest } = row; return rest;", "withheld.add(index); return row;", "test/m4/review-fixes.test.mjs"]
 ];
 
 const root = process.cwd();
@@ -100,7 +106,11 @@ for (const [name, file, find, replace, testFile] of MUTANTS) {
     fs.writeFileSync(target, text.replace(find, replace));
     const run = spawnSync(process.execPath, ["test", testFile], { cwd: copy, encoding: "utf8", env: { ...process.env, UNIVERSAL_PEER_MAINTENANCE_DELAY_MS: "3600000" } });
     results.push({ name, status: run.status === 0 ? "SURVIVED (test stayed green)" : "killed (red)" });
-  } finally { fs.rmSync(copy, { recursive: true, force: true }); }
+  } finally {
+    // A red test can leave a daemon (detached) or a session double running from the copy: stop them.
+    try { const ps = execFileSync("/bin/ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8" }); for (const line of ps.split("\n")) { const m = /^\s*(\d+)\s+(.*)$/.exec(line); if (m && m[2].includes(copy) && Number(m[1]) !== process.pid) { try { process.kill(Number(m[1]), "SIGTERM"); } catch {} } } } catch {}
+    fs.rmSync(copy, { recursive: true, force: true });
+  }
 }
 for (const r of results) console.log(`${r.status.padEnd(28)} ${r.name}`);
 process.exitCode = results.every((r) => r.status === "killed (red)") ? 0 : 1;

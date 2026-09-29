@@ -5,7 +5,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { statePaths } from "../../src/core/state-paths.mjs";
 import { normalizeProcStart, processStart } from "../../src/adapters/claude-native-v1/darwin-procargs.mjs";
@@ -28,12 +28,15 @@ export async function lane() {
       const argv = [fake, "claude", sessions, sessionId, cwd, ...(mode ? ["--permission-mode", mode] : []), ...(resume ? ["--resume", resume] : []), ...extra];
       const s = await start(process.execPath, argv, env); s.sessionId = sessionId; s.kind = "claude"; sessionsList.push(s); return s;
     },
+    async rollout(threadId) { const day = path.join(codexHome, "sessions", "2026", "09", "29"); await fsp.mkdir(day, { recursive: true, mode: 0o700 }); await fsp.writeFile(path.join(day, `rollout-2026-09-29T00-00-00-${threadId}.jsonl`), "", { mode: 0o600 }); },
     async codex({ threadId = uuidv7(), rollout = true } = {}) {
       if (rollout) { const day = path.join(codexHome, "sessions", "2026", "09", "29"); await fsp.mkdir(day, { recursive: true, mode: 0o700 }); await fsp.writeFile(path.join(day, `rollout-2026-09-29T00-00-00-${threadId}.jsonl`), "", { mode: 0o600 }); }
       const s = await start(path.join(bin, "codex"), [fake, "codex", threadId], env); s.threadId = threadId; s.kind = "codex"; sessionsList.push(s); return s;
     },
-    // A command run by the test process itself: not inside any session (the Owner's terminal).
+    // A command run by the test process itself: not inside any session, no terminal.
     async owner(argv) { return runDirect(argv, env); },
+    // The operator path: the same command under a pseudo-terminal (script(1)) with a phrase typed at it.
+    async operator(argv, phrase) { return runOperator(argv, env, phrase); },
     async stop() {
       for (const s of sessionsList.splice(0)) await s.close();
       await stopDaemon(root);
@@ -62,7 +65,7 @@ async function start(command, argv, env) {
   const pid = await Promise.race([readyP, new Promise((_, rej) => setTimeout(() => rej(new Error("session double did not start")), 10_000))]);
   return {
     pid, child, notes,
-    run(args) { const id = ++counter; return new Promise((resolve) => { waiters.set(id, (m) => resolve(parse(m))); child.stdin.write(`${JSON.stringify({ id, argv: args })}\n`); }); },
+    run(args, { thread = null } = {}) { const id = ++counter; return new Promise((resolve) => { waiters.set(id, (m) => resolve(parse(m))); child.stdin.write(`${JSON.stringify({ id, argv: args, ...(thread ? { thread } : {}) })}\n`); }); },
     async close() { if (child.exitCode !== null) return; child.stdin.write(`${JSON.stringify({ id: 0, exit: true })}\n`); await Promise.race([new Promise((r) => child.once("exit", r)), Bun.sleep(3000)]); if (child.exitCode === null) child.kill("SIGKILL"); }
   };
 }
@@ -96,4 +99,25 @@ export async function stopDaemon(root) {
 
 export async function writeBody(L, text) {
   const file = path.join(L.work, `body-${crypto.randomUUID()}.txt`); await fsp.writeFile(file, text, { mode: 0o600 }); return file;
+}
+
+async function runOperator(argv, env, phrase) {
+  const cli = path.resolve(here, "../../src/cli.mjs");
+  const clean = { ...env }; delete clean.CODEX_THREAD_ID;
+  // script(1) refuses a socket (what spawn's "pipe" is, and what a macOS FIFO is) as its stdin, so a
+  // real pipe is put in front of it with cat.
+  const quoted = [process.execPath, cli, ...argv].map((a) => `'${String(a).replace(/'/g, "'\\''")}'`).join(" ");
+  const child = spawn("/bin/sh", ["-c", `/bin/cat | /usr/bin/script -q /dev/null ${quoted} | /bin/cat`], { env: clean, stdio: ["pipe", "pipe", "pipe"] });
+  let out = ""; let typed = false;
+  child.stdout.on("data", (d) => { out += d; if (!typed && out.includes("to continue:")) { typed = true; setTimeout(() => child.stdin.write(`${phrase}\n`), 50); } });
+  const exited = new Promise((r) => child.on("close", r));
+  // script ends when the command does; cat in front ends when its input closes.
+  const watcher = setInterval(() => { if (/\}\s*$/.test(out.replace(/\r/g, ""))) child.stdin.end(); }, 50);
+  const code = await exited; clearInterval(watcher);
+  const text = out.replace(/\r/g, "");
+  const after = typed ? text.slice(text.indexOf("to continue:") + 12) : text;
+  const start = after.indexOf("{");
+  let json = null; let error = null;
+  try { const parsed = JSON.parse(after.slice(start)); if (parsed && parsed.ok === false) error = parsed; else json = parsed; } catch { error = { raw: text.slice(-400) }; }
+  return { code, json, error, prompted: typed };
 }

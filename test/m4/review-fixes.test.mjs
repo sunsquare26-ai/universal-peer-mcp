@@ -15,6 +15,9 @@ import { acceptPost } from "../../src/core/posts.mjs";
 import { sweepOrphanBodies } from "../../src/core/orphans.mjs";
 import { openStore, tempRoot } from "../m1/helpers.mjs";
 
+// The operator path is refused by design inside an agent session; run under a Codex shell, the
+// positive operator cases are skipped (the negative ones still run).
+const INSIDE_CODEX = Boolean(process.env.CODEX_THREAD_ID);
 const lanes = [];
 afterEach(async () => { for (const L of lanes.splice(0)) await L.stop(); });
 async function setup() {
@@ -33,11 +36,13 @@ test("--replace, post before: the new session never sees or acks the old session
   await x2.run(["register", "--alias", "test-codex-1", "--replace"]);
   expect((await x2.run(["inbox"])).json.events).toEqual([]);
   expect((await x2.run(["inbox-ack", "--message-id", waiting])).error).toMatchObject({ code: "NOT_RECIPIENT" });
-  expect((await x2.run(["link", "--post", waiting])).error).toMatchObject({ code: "OWNER_ONLY" });
+  expect((await x2.run(["link", "--post", waiting])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
+  expect((await L.owner(["link", "--post", waiting])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
   const listed = (await L.owner(["peers"])).json;
   expect(listed.peers.find((p) => p.alias === "test-codex-1").heldForPreviousSession).toBe(1);
   expect(JSON.stringify(listed)).not.toContain("secret");
-  expect((await L.owner(["link", "--post", waiting])).json).toMatchObject({ relinked: true, recipient: "test-codex-1" });
+  if (INSIDE_CODEX) return;   // the operator path is refused inside an agent session (see below)
+  expect((await L.operator(["link", "--post", waiting], `CONFIRM ${waiting}`)).json).toMatchObject({ relinked: true, recipient: "test-codex-1" });
   const box = (await x2.run(["inbox"])).json.events;
   expect(box.map((e) => [e.messageId, e.body])).toEqual([[waiting, "secret for x1"]]);
   expect((await L.owner(["peers"])).json.peers.find((p) => p.alias === "test-codex-1").heldForPreviousSession).toBeUndefined();
@@ -99,30 +104,57 @@ async function otherProcess(L, method, args) {
 const bodies = (events) => events.filter((e) => typeof e.body === "string").map((e) => (e.body.includes("REPLY-BODY") ? "REPLY-BODY" : e.body));
 
 for (const legacy of [false, true]) {
-  test(`legacy peer_send → peer_wait reply path works with the compatibility window ${legacy ? "on" : "off"}; other readers get ${legacy ? "bodies (window)" : "none"}`, async () => {
+  test(`compatibility window ${legacy ? "on: legacy peer_send → peer_wait bodies, for every reader" : "off: no diagnostic answer carries a body, not even to the process that sent the request"}`, async () => {
     const { L, send } = await seeded({ legacy });
     const status = await controlCall("daemon_status", {}, { root: L.root });
     expect(status.settings.warning).toBe(legacy ? "진단 본문 노출 호환창 켜짐" : undefined);
     const expect_ = { daemonPid: status.pid, daemonProcStart: status.procStart, targetsDigest: status.targetsDigest };
-    // This process asks (a replay of the request: no socket is touched), then waits for the reply.
+    // This process asks (a replay of the request: no socket is touched), then waits for the reply —
+    // the way a Codex MCP serve did, and one serve can carry several threads.
     const replay = await controlCall("peer_send", send, { root: L.root, expect: expect_ });
     expect(replay.status).toBe("replied");
     const waited = await controlCall("peer_wait", { messageId: send.messageId, require: "reply", timeoutMs: 100 }, { root: L.root });
-    expect(waited.event.body).toContain("REPLY-BODY");
     const mine = await controlCall("peer_list_events", { afterSeq: 0 }, { root: L.root });
-    expect(bodies(mine.events)).toEqual(legacy ? expect.arrayContaining(["REPLY-BODY", "free text UNMATCHED-BODY"]) : ["REPLY-BODY"]);
-    // Any other process reading by cursor or waiting on the id:
     const theirs = await otherProcess(L, "peer_list_events", { afterSeq: 0 });
     const theirWait = await otherProcess(L, "peer_wait", { messageId: send.messageId, require: "reply", timeoutMs: 100 });
-    if (legacy) { expect(bodies(theirs.events).length).toBe(2); expect(theirWait.event.body).toContain("REPLY-BODY"); }
-    else {
-      expect(bodies(theirs.events)).toEqual([]); expect(theirWait.event.body).toBeUndefined();
-      expect(theirs.events.filter((e) => e.bodyInlineOmitted === "not_for_this_reader").length).toBe(2);
+    if (legacy) {
+      expect(waited.event.body).toContain("REPLY-BODY"); expect(theirWait.event.body).toContain("REPLY-BODY");
+      expect(bodies(mine.events).length).toBe(2); expect(bodies(theirs.events).length).toBe(2);
+    } else {
+      expect(waited.event.body).toBeUndefined(); expect(theirWait.event.body).toBeUndefined();
+      expect(bodies(mine.events)).toEqual([]); expect(bodies(theirs.events)).toEqual([]);
+      expect(waited.event.bodyInlineOmitted).toBe("not_for_this_reader");
       expect(JSON.stringify(await otherProcess(L, "trace_message", { messageId: send.messageId }))).not.toContain("REPLY-BODY");
     }
     expect((await L.owner(["peers"])).json.warning).toBe(legacy ? "진단 본문 노출 호환창 켜짐" : undefined);
   });
 }
+
+test("two Codex threads in one host process: a thread's answer reaches only its own inbox; the other thread and every diagnostic reader get no body", async () => {
+  const { L, c1, x1 } = await setup();            // x1: a host process; its default thread is test-codex-1
+  const T2 = (await import("./harness.mjs")).uuidv7(); await L.rollout(T2);
+  expect((await x1.run(["register", "--alias", "test-codex-2"], { thread: T2 })).json).toMatchObject({ state: "registered", kind: "codex", threadId: T2 });
+  // Codex sends with the shell post; Claude answers with --reply-to.
+  const ask = await post(L, x1, "test-claude-1", "QUESTION");
+  const q = (await c1.run(["inbox"])).json.events;
+  expect(q.map((e) => [e.messageId, e.body, e.senderAlias])).toEqual([[ask, "QUESTION", "test-codex-1"]]);
+  const ans = await c1.run(["post", "--reply-to", ask, "--body-file", await writeBody(L, "ANSWER")]);
+  expect(ans.json).toMatchObject({ replyTo: ask, results: [{ recipient: "test-codex-1", state: "accepted" }] });
+  // Only the asking thread reads it; the other thread in the same host process sees nothing.
+  expect((await x1.run(["inbox"])).json.events.map((e) => [e.body, e.replyTo])).toEqual([["ANSWER", ask]]);
+  expect((await x1.run(["inbox"], { thread: T2 })).json.events).toEqual([]);
+  expect((await x1.run(["inbox", "--recipient", "test-codex-1"], { thread: T2 })).error).toMatchObject({ code: "RECIPIENT_MISMATCH" });
+  // Nobody else may answer for Claude, and diagnostics hand out neither the question nor the answer.
+  expect((await x1.run(["post", "--reply-to", ask, "--body-file", await writeBody(L, "forged")], { thread: T2 })).error).toMatchObject({ code: "REPLY_NOT_ALLOWED" });
+  const listing = JSON.stringify(await otherProcess(L, "peer_list_events", { afterSeq: 0 }));
+  expect(listing).not.toContain("QUESTION"); expect(listing).not.toContain("ANSWER");
+  // The answer stays bound to the asking thread even after the alias moves to another thread.
+  const again = await post(L, x1, "test-claude-1", "SECOND");
+  const x3 = await L.codex(); await x3.run(["register", "--alias", "test-codex-1", "--replace"]);
+  expect((await c1.run(["post", "--reply-to", again, "--body-file", await writeBody(L, "LATE")])).json.results[0].state).toBe("accepted");
+  expect((await x3.run(["inbox"])).json.events).toEqual([]);
+  expect((await L.owner(["peers"])).json.peers.find((p) => p.alias === "test-codex-1").heldForPreviousSession).toBe(2);   // ANSWER (unacked) + LATE
+});
 
 test("a peer's post body is not in the diagnostic answers; its own inbox still returns it", async () => {
   const { L, c1, x1 } = await setup();
@@ -151,4 +183,46 @@ test("a post whose row cannot be written leaves no body file; a later sweep move
     expect(await sweepOrphanBodies({ root, store, graceMs: 0 })).toEqual({ moved: 0 });
     await store.close();
   } finally { await fsp.rm(root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------- operator(interactive-tty)
+test("cross-session mutations are refused: dispose, link, relink, unregister of another's items; own items pass", async () => {
+  const { L, c1, x1 } = await setup();
+  const m = await post(L, c1, "test-codex-1", "DISPOSABLE");
+  const row = (await x1.run(["inbox"])).json.events[0];
+  expect(row.seq).toBeGreaterThan(0);
+  // another session cannot dispose it, nor can a terminal without a tty
+  expect((await c1.run(["body-dispose", "--seq", String(row.seq), "--disposition", "discard"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
+  expect((await L.owner(["body-dispose", "--seq", String(row.seq), "--disposition", "discard"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
+  // the recipient session can
+  expect((await x1.run(["body-dispose", "--seq", String(row.seq), "--disposition", "discard"])).json).toMatchObject({ disposition: "discard" });
+  // link of an unmatched frame / relink / another alias: refused to sessions and to non-tty callers
+  expect((await c1.run(["link", "--seq", "1", "--message-id", m, "--as", "ack"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
+  expect((await L.owner(["link", "--seq", "1", "--message-id", m, "--as", "ack"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "no_tty" });
+  expect((await x1.run(["unregister", "--alias", "test-claude-1"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
+  // an unregistered Claude session is still a session
+  const stranger = await L.claude();
+  expect((await stranger.run(["whoami"])).json.authenticated).toBe(false);
+  expect((await stranger.run(["link", "--post", m])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
+  expect((await stranger.run(["unregister", "--alias", "test-codex-1"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
+  const refused = (await L.events()).filter((e) => e.type === "operator_refused");
+  expect(refused.every((e) => e.operator === "operator(interactive-tty)")).toBe(true);
+  expect(refused.length).toBe(7);
+  // diagnostics: metadata keeps seq, not the body file name
+  const listing = await otherProcess(L, "peer_list_events", { afterSeq: 0 });
+  expect(listing.events.every((e) => e.bodyFile === undefined && Number.isInteger(e.seq))).toBe(true);
+});
+
+test.skipIf(INSIDE_CODEX)("operator(interactive-tty): the phrase typed at a terminal outside any session passes and is recorded; a wrong phrase does not", async () => {
+  const { L, c1, x1 } = await setup();
+  const wrong = await L.operator(["unregister", "--alias", "test-claude-1"], "CONFIRM test-codex-1");
+  expect(wrong.prompted).toBe(true); expect(wrong.error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "confirm_mismatch" });
+  expect((await L.operator(["unregister", "--alias", "test-claude-1"], "CONFIRM test-claude-1")).json).toEqual({ removed: true, alias: "test-claude-1", kind: "claude" });
+  const m = await post(L, x1, "test-codex-1", "to self");
+  const seq = (await x1.run(["inbox"])).json.events[0].seq;
+  expect((await L.operator(["body-dispose", "--seq", String(seq), "--disposition", "discard"], `CONFIRM ${seq}`)).json).toMatchObject({ disposition: "discard" });
+  const actions = (await L.events()).filter((e) => e.type === "operator_action");
+  expect(actions.map((e) => [e.action, e.target, e.operator])).toEqual([["unregister", "test-claude-1", "operator(interactive-tty)"], ["dispose", String(seq), "operator(interactive-tty)"]]);
+  expect(actions.every((e) => /^tty/.test(e.tty))).toBe(true);
+  void c1; void m;
 });

@@ -15,6 +15,13 @@ import { sendDoorbell } from "./core/doorbell.mjs";
 // With --ledger the file is read directly, read-only, and no daemon is contacted — the way to read
 // a copied ledger days later. Without it the running daemon answers. Output is JSON with ids,
 // stages, times, codes and masked first lines; never a body.
+// operator(interactive-tty): the phrase is asked only at an interactive terminal; anywhere else the
+// command is sent without it and the daemon decides (own items pass, others are refused).
+async function operatorArgs(target) {
+  const { askOperator } = await import("./core/operator.mjs");
+  const confirm = await askOperator(target);
+  return confirm === null ? {} : { operator: { confirm } };
+}
 function option(args, name) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; }
 
 async function readLedger(file) {
@@ -54,16 +61,16 @@ export async function observeCommand(command, args) {
     // The explicit way a kept body leaves: recorded first, then (for discard) deleted.
     const sourceSeq = Number(option(args, "--seq")); const disposition = option(args, "--disposition");
     const { controlCall } = await import("./core/control.mjs");
-    return controlCall("inbound_body_dispose", { sourceSeq, disposition });
+    return controlCall("inbound_body_dispose", { sourceSeq, disposition, ...(await operatorArgs(String(sourceSeq))) });
   }
   if (command === "post") {
     // The sender writes only the text. Ids and the first line are the tool's (M2).
     const to = (option(args, "--to") ?? "").split(",").filter(Boolean);
-    const bodyFile = option(args, "--body-file");
-    if (!bodyFile) throw new Error("usage: post --to a[,b] --body-file f [--group-id uuid]");
+    const bodyFile = option(args, "--body-file"); const replyTo = option(args, "--reply-to");
+    if (!bodyFile || (!replyTo && to.length === 0)) throw new Error("usage: post --to a[,b] --body-file f [--group-id uuid] | post --reply-to <messageId> --body-file f");
     const body = fs.readFileSync(bodyFile, "utf8");
     const { controlCall } = await import("./core/control.mjs");
-    return controlCall("peer_post", { to, body, ...(option(args, "--group-id") ? { groupId: option(args, "--group-id") } : {}) });
+    return controlCall("peer_post", { ...(to.length ? { to } : {}), body, ...(replyTo ? { replyTo } : {}), ...(option(args, "--group-id") ? { groupId: option(args, "--group-id") } : {}) });
   }
   if (command === "inbox") { const { controlCall } = await import("./core/control.mjs"); const recipient = option(args, "--recipient"); return controlCall("peer_inbox", recipient ? { recipient } : {}); }
   // M4 onboarding. `register` is run by the session being registered (its own shell), which is what
@@ -78,7 +85,7 @@ export async function observeCommand(command, args) {
     const alias = option(args, "--alias");
     if (!alias) throw new Error("usage: unregister --alias <name>");
     const { controlCall } = await import("./core/control.mjs");
-    return controlCall("peer_unregister", { alias });
+    return controlCall("peer_unregister", { alias, ...(await operatorArgs(alias)) });
   }
   if (command === "peers") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_directory", {}); }
   if (command === "whoami") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_whoami", {}); }
@@ -86,8 +93,8 @@ export async function observeCommand(command, args) {
   if (command === "link") {
     const { controlCall } = await import("./core/control.mjs");
     // M4: `link --post <messageId>` re-addresses a held post to its alias's current session (Owner only).
-    if (option(args, "--post")) return controlCall("peer_post_relink", { messageId: option(args, "--post") });
-    return controlCall("peer_link_unmatched", { sourceSeq: Number(option(args, "--seq")), messageId: option(args, "--message-id"), as: option(args, "--as"), ...(option(args, "--verdict") ? { verdict: option(args, "--verdict") } : {}) });
+    if (option(args, "--post")) return controlCall("peer_post_relink", { messageId: option(args, "--post"), ...(await operatorArgs(String(option(args, "--post")).toLowerCase())) });
+    return controlCall("peer_link_unmatched", { ...(await operatorArgs(String(Number(option(args, "--seq"))))), sourceSeq: Number(option(args, "--seq")), messageId: option(args, "--message-id"), as: option(args, "--as"), ...(option(args, "--verdict") ? { verdict: option(args, "--verdict") } : {}) });
   }
   throw new Error("unknown command");
 }
