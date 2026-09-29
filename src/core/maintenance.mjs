@@ -38,7 +38,7 @@ export async function runMaintenance({ root, store, alerts, now = Date.now(), co
   }
   if (archiveOk) {
     try {
-      report.expiry = await expireInboundBodies({ root, store, now, days: config.retentionDays });
+      report.expiry = await expireInboundBodies({ root, store, alerts, now, days: config.retentionDays });
       if (report.expiry.stoppedBy) await alarm("retention_stopped", `retention_stopped:${report.at.slice(0, 10)}`, report.expiry.stoppedBy);
     } catch (error) { report.errors.push({ step: "expiry", code: codeOf(error) }); await alarm("retention_stopped", `retention_stopped:${report.at.slice(0, 10)}`, codeOf(error)); }
   }

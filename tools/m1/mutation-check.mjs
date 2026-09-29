@@ -15,11 +15,8 @@ const MUTANTS = [
   ["rebind counted twice (switched-off link)", "src/core/session-rebind.mjs", "function linked(row) { return Number.isInteger(row?.seq) ? { rebindFailedSeq: row.seq } : {}; }", "function linked(row) { return {}; }", "test/m1/rebind-once.test.mjs"],
   ["ack counted per row", "src/core/trace.mjs", "case \"peer_ack\": if (id && !seenAck.has(id))", "case \"peer_ack\": if (id)", "test/m1/trace.test.mjs"],
   ["today archived while open", "src/core/archive.mjs", "if (!day || day >= today) continue;", "if (!day || day > today) continue;", "test/m1/archive.test.mjs"],
-  ["expire ignores digest", "src/core/retention.mjs", "if (digest !== row.bodySha256) {", "if (false) {", "test/m1/retention.test.mjs"],
-  ["expire deletes when ledger refuses", "src/core/retention.mjs", "} catch { result.stoppedBy = \"ledger_append_failed\"; return result; }\n    await fsp.unlink(file);", "} catch { result.stoppedBy = \"ledger_append_failed\"; }\n    await fsp.unlink(file);", "test/m1/retention.test.mjs"],
   ["expired reads as unreadable", "src/core/inbound-hydrate.mjs", "if (expired.has(events[index].bodyFile))", "if (false)", "test/m1/retention.test.mjs"],
   ["doorbell sends without intent", "src/core/doorbell.mjs", "return { state: \"not_sent\", reason: \"trace_intent_failed\", code: typeof error?.code === \"string\" ? error.code : null, attemptId };", "void error;", "test/m1/doorbell.test.mjs"],
-  ["phone not masked", "src/core/mask.mjs", ".replace(PHONE, \"[phone]\")", "", "test/m1/mask.test.mjs"],
   ["attempt takes free text", "src/core/attempts.mjs", "for (const key of Object.keys(args)) if (!allowed.includes(key)) throw invalid(`unsupported field ${key}`);", "", "test/m1/attempts.test.mjs"],
   ["alert not deduped", "src/core/alerts.mjs", "if (this.keys.has(key)) return { raised: false, duplicate: true };", "", "test/m1/alerts.test.mjs"],
   ["no daemon_started row", "src/daemon.mjs", "await store.append(\"daemon_started\", { generationId, daemonPid: process.pid, daemonProcStart: selfProcStart, buildId: BUILD_ID });", "", "test/m1/daemon-observation.test.mjs"],
@@ -28,6 +25,14 @@ const MUTANTS = [
   ["bridge notifies before logging", "tools/alert-bridge/air-notify.sh", "printf '%s alert kind=%s key=%s code=%s\\n' \"$now\" \"$kind\" \"$key\" \"$code\" >> \"$log\" || exit 1", "true", "test/m1/air-notify.test.mjs"],
   ["bridge never falls back", "tools/alert-bridge/air-notify.sh", "if [ \"$rc\" -ne 255 ]; then", "if false; then", "test/m1/air-notify.test.mjs"],
   ["bridge retries a sleeping Air", "tools/alert-bridge/air-notify.sh", "if [ \"$rc\" -ne 255 ]; then", "if true; then", "test/m1/air-notify.test.mjs"],
+  ["expire ignores digest", "src/core/retention.mjs", "if (digest !== row.bodySha256) return", "if (false) return", "test/m1/retention.test.mjs"],
+  ["expire deletes when ledger refuses", "src/core/retention.mjs", "} catch { return \"ledger_append_failed\"; }\n  await fsp.unlink(file);", "} catch {}\n  await fsp.unlink(file);", "test/m1/retention.test.mjs"],
+  ["retention ignores conclusion", "src/core/retention.mjs", "if (!isConcluded(row, state)) {", "if (false) {", "test/m1/retention.test.mjs"],
+  ["unprocessed alarmed every run", "src/core/retention.mjs", "if (state.exceeded.has(row.seq)) continue;", "", "test/m1/retention.test.mjs"],
+  ["expiry on by default", "src/core/retention.mjs", "export const DEFAULT_BODY_RETENTION_DAYS = 0;", "export const DEFAULT_BODY_RETENTION_DAYS = 30;", "test/m1/retention.test.mjs"],
+  ["header keeps unknown tokens", "src/core/protocol-header.mjs", "if (!field || field in header) continue;", "if (!field) { header[token.slice(0, at)] = token.slice(at + 1); continue; } if (field in header) continue;", "test/m1/protocol-header.test.mjs"],
+  ["header keeps a non-protocol line", "src/core/protocol-header.mjs", "if (!HEADER_VERBS.includes(verb)) return null;", "if (!HEADER_VERBS.includes(verb)) return { verb: line };", "test/m1/protocol-header.test.mjs"],
+  ["spool stores the first line", "src/core/inbound-spool.mjs", "const header = protocolHeader(body); return header === null ? {} : { header };", "return { firstLine: body.split(\"\\n\")[0] };", "test/m1/retention.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
 ];
 

@@ -7,6 +7,7 @@ import { sendDoorbell } from "./core/doorbell.mjs";
 // `universal-peer-mcp trace <messageId> [--ledger <events.jsonl>]`
 // `universal-peer-mcp stats [--days N] [--ledger <events.jsonl>]`
 // `universal-peer-mcp doorbell --thread <uuid> --message-id <uuid> [--alias <alias>]`
+// `universal-peer-mcp body-dispose --seq <n> --disposition processed|discard`
 //
 // With --ledger the file is read directly, read-only, and no daemon is contacted — the way to read
 // a copied ledger days later. Without it the running daemon answers. Output is JSON with ids,
@@ -45,6 +46,12 @@ export async function observeCommand(command, args) {
     if (result.state === "not_sent") process.exitCode = 3;
     else if (result.state !== "queued") process.exitCode = 4;
     return result;
+  }
+  if (command === "body-dispose") {
+    // The explicit way a kept body leaves: recorded first, then (for discard) deleted.
+    const sourceSeq = Number(option(args, "--seq")); const disposition = option(args, "--disposition");
+    const { controlCall } = await import("./core/control.mjs");
+    return controlCall("inbound_body_dispose", { sourceSeq, disposition });
   }
   throw new Error("unknown command");
 }

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { atomicPrivateWrite, ensurePrivateDirectory, INBOUND_DIRNAME } from "./state-paths.mjs";
-import { maskFirstLine } from "./mask.mjs";
+import { protocolHeader } from "./protocol-header.mjs";
 
 // A frame's body is the one thing that arrived and that nothing on this side kept. The ledger is
 // the wrong place for it and says so — the published event contract has no field for a body
@@ -46,9 +46,9 @@ export class InboundSpool {
       bodyFile: `${INBOUND_DIRNAME}/${name}`,
       bodyBytes: bytes.byteLength,
       bodySha256: crypto.createHash("sha256").update(bytes).digest("hex"),
-      // The one piece of the body the ledger keeps, masked (src/core/mask.mjs). It is what is left to
-      // recognise the message by after the file itself is expired (src/core/retention.mjs).
-      ...(() => { const firstLine = maskFirstLine(body); return firstLine === null ? {} : { firstLine }; })(),
+      // The protocol header of the first line, allowlisted fields only (src/core/protocol-header.mjs).
+      // No free text of the body reaches the ledger.
+      ...(() => { const header = protocolHeader(body); return header === null ? {} : { header }; })(),
       ...(bytes.byteLength === full.byteLength ? {} : { bodyTruncated: true })
     };
   }

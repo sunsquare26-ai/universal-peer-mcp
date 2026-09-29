@@ -6,6 +6,6 @@ if (command === "serve") {
   if (enabled.length) process.env.CLAUDE_PEER_MCP_EXTENSIONS = [...new Set(enabled)].sort().join(",");
   await import("./server.mjs");
 }
-else if (["trace", "stats", "doorbell"].includes(command)) { const { observeCommand } = await import("./observe-cli.mjs"); process.stdout.write(`${JSON.stringify(await observeCommand(command, process.argv.slice(3)), null, 2)}\n`); }
+else if (["trace", "stats", "doorbell", "body-dispose"].includes(command)) { const { observeCommand } = await import("./observe-cli.mjs"); process.stdout.write(`${JSON.stringify(await observeCommand(command, process.argv.slice(3)), null, 2)}\n`); }
 else if (command === "doctor") { const { doctor } = await import("./doctor.mjs"); process.stdout.write(`${JSON.stringify(await doctor(), null, 2)}\n`); }
-else { process.stderr.write("usage: universal-peer-mcp [serve [--enable milestone] [--enable code-review]|doctor|trace <id> [--ledger f]|stats [--days n] [--ledger f]|doorbell --thread <uuid> --message-id <uuid> [--alias a]]\n"); process.exitCode = 2; }
+else { process.stderr.write("usage: universal-peer-mcp [serve [--enable milestone] [--enable code-review]|doctor|trace <id> [--ledger f]|stats [--days n] [--ledger f]|doorbell --thread <uuid> --message-id <uuid> [--alias a]|body-dispose --seq <n> --disposition processed|discard]\n"); process.exitCode = 2; }

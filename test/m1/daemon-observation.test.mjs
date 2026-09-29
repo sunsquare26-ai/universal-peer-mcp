@@ -40,6 +40,8 @@ test("daemon_started/daemon_stopping, ledger health in daemon_status, trace_atte
     const stats = await controlCall("ledger_daily_stats", { days: 1 }, { root });
     expect(Object.values(stats.days)[0]).toMatchObject({ daemonStarts: 1, attempts: { codex_queue: 1 }, attemptOutcomes: { queued: 1 } });
     expect(status.generationId).toBe((await controlCall("daemon_status", {}, { root })).generationId);
+    await expect(controlCall("inbound_body_dispose", { sourceSeq: 1, disposition: "discard" }, { root })).rejects.toMatchObject({ code: "BODY_UNKNOWN" });
+    await expect(controlCall("inbound_body_dispose", { sourceSeq: 1, disposition: "all" }, { root })).rejects.toMatchObject({ code: "INVALID_CONTROL_ARGUMENTS" });
   } finally { await stop(root); delete process.env.UNIVERSAL_PEER_MAINTENANCE_DELAY_MS; }
   const rows = (await fsp.readFile(statePaths(root).events, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
   expect(rows[0]).toMatchObject({ seq: 1, type: "daemon_started" });

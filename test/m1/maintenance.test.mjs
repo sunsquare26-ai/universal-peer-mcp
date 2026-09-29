@@ -31,10 +31,13 @@ test("a day later: the closed day is copied and recorded, the ledger only grows,
   expect(s.store.events.at(-1)).toMatchObject({ type: "ledger_archived", firstSeq: 1, lastSeq: 2, rows: 2 });
 });
 
-test("31 days later with a backup disk: copy, expire, back up", async () => {
+test("31 days later with a backup disk: copy, keep the unprocessed body (alarm), back up", async () => {
   const s = await stand(); const disk = path.join(s.root, "disk"); await fsp.mkdir(disk, { mode: 0o700 });
   const report = await runMaintenance({ root: s.root, store: s.store, alerts: s.alerts, now: Date.now() + 31 * DAY, config: { retentionDays: 30, backupDestination: disk } });
-  expect(report.expiry.expired).toBe(1);
+  expect(report.expiry).toMatchObject({ expired: 0, unprocessed: 1 });
+  expect((await fsp.readdir(path.join(s.root, "inbound"))).length).toBe(1);
+  const alerts = (await fsp.readFile(path.join(s.root, "alerts.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  expect(alerts.map((a) => a.kind)).toEqual(["retention_unprocessed"]);
   expect(report.backup).toMatchObject({ configured: true, copied: 2 });
   expect((await fsp.readdir(disk)).length).toBe(2);
 });

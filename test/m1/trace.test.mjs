@@ -12,7 +12,7 @@ test("acked message: every stage with its time, bottleneck is the longest gap", 
     ["send_requested", T("23:37.794"), send(M)],
     ["socket_write_complete", T("23:37.808"), { messageId: M }],
     ["peer_socket_hold_bounded", T("23:38.810"), {}],
-    ["peer_ack", T("23:45.262"), { messageId: M, evidence: "application_ack", firstLine: "PEER_ACK v=1 …" }]
+    ["peer_ack", T("23:45.262"), { messageId: M, evidence: "application_ack", header: { verb: "PEER_ACK", v: "1" } }]
   ]);
   const t = traceMessage(rows, M);
   expect(t.found).toBe(true);
@@ -108,12 +108,12 @@ test("daily counts: first ACK/reply per message only, days in Korea time, hold r
   expect(JSON.stringify(d)).not.toContain("hold");
 });
 
-test("a trace never carries a body, a body file name or a digest-free secret", () => {
+test("a trace never carries a body, a body file name or free text", () => {
   const rows = ledger([
     ["send_requested", T("00:00.000"), send(M)],
-    ["peer_reply", T("00:05.000"), { messageId: M, verdict: "pass", bodyFile: "inbound/x.txt", body: "760124-1234567 본문", bodyBytes: 20, bodySha256: "a".repeat(64), firstLine: "[rrn] 본문" }]
+    ["peer_reply", T("00:05.000"), { messageId: M, verdict: "pass", bodyFile: "inbound/x.txt", body: "760124-1234567 본문", bodyBytes: 20, bodySha256: "a".repeat(64), header: { verb: "PEER_REPLY", verdict: "pass" } }]
   ]);
   const text = JSON.stringify(traceMessage(rows, M));
   expect(text).not.toContain("760124"); expect(text).not.toContain("inbound/x.txt"); expect(text).not.toContain("\"body\"");
-  expect(text).toContain("[rrn] 본문");
+  expect(text).not.toContain("본문"); expect(text).toContain("PEER_REPLY");
 });

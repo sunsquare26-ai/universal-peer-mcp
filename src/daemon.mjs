@@ -25,7 +25,7 @@ import { BUILD_ID } from "./core/build-identity.mjs";
 import { AlertSink } from "./core/alerts.mjs";
 import { recordAttempt } from "./core/attempts.mjs";
 import { dailyStats, traceMessage } from "./core/trace.mjs";
-import { expiredBodyFiles } from "./core/retention.mjs";
+import { disposeInboundBody, expiredBodyFiles } from "./core/retention.mjs";
 import { maintenanceConfig, MAINTENANCE_INTERVAL_MS, runMaintenance } from "./core/maintenance.mjs";
 import { dayOf } from "./core/days.mjs";
 
@@ -200,6 +200,7 @@ async function dispatch(method, args, caller = null) {
   if (method === "peer_wait") return withInlineBodies(await core.wait(args), caller, method);
   if (method === "peer_list_events") { const listing = core.events(args); return withInlineBodies({ ...listing, events: listing.events.map(publicLedgerEvent) }, caller, method); }
   if (method === "trace_attempt") return recordAttempt(store, args);
+  if (method === "inbound_body_dispose") return disposeInboundBody({ root: paths.root, store, sourceSeq: args.sourceSeq, disposition: args.disposition });
   if (method === "trace_message") { if (typeof args.messageId !== "string" || !/^[0-9a-f-]{36}$/i.test(args.messageId)) throw Object.assign(new Error("messageId must be a uuid"), { code: "INVALID_CONTROL_ARGUMENTS" }); return traceMessage(store.events, args.messageId); }
   if (method === "ledger_daily_stats") { const days = Number.isInteger(args.days) && args.days > 0 && args.days <= 400 ? args.days : 30; return { days: dailyStats(store.events, { sinceDay: dayOf(Date.now() - (days - 1) * 86_400_000) }) }; }
   if (method === "milestone_status" && milestone) return milestone.status(args);

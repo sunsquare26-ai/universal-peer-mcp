@@ -48,7 +48,7 @@ function stageOf(row) {
 
 function stageEntry(row, stage) {
   const entry = { stage, seq: row.seq, at: row.at };
-  for (const key of ["reason", "errorCode", "evidence", "verdict", "state", "outcome", "attemptId", "returnedId", "readerPid", "firstLine", "waitedMs", "require"]) {
+  for (const key of ["reason", "errorCode", "evidence", "verdict", "state", "outcome", "attemptId", "returnedId", "readerPid", "header", "waitedMs", "require"]) {
     if (row[key] !== undefined && row[key] !== null) entry[key] = row[key];
   }
   return entry;

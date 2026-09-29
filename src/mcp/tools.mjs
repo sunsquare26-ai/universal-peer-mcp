@@ -92,10 +92,11 @@ export function toolDefinitions(aliases, { admin = false, extensions = [], reque
       // result that was inside it. The cap is enforced where the bytes are taken.
       bodyStorageOmitted: { type: "string", enum: ["write_failed"] }, body: { type: "string" }, bodyInlineBytes: { type: "integer", minimum: 0 },
       bodyInlineTruncated: { type: "boolean" }, bodyInlineOmitted: { type: "string" },
-      // M1 observation fields. `firstLine` is the masked first line of a spooled body
-      // (src/core/mask.mjs); the rest name attempts, reads, expiries, generations and the rebind row
-      // a resolve failure belongs to (src/core/attempts.mjs, trace.mjs, retention.mjs).
-      firstLine: { type: "string" }, rebindFailedSeq: { type: "integer", minimum: 1 },
+      // M1 observation fields. `header` is the allowlisted protocol header of a spooled body
+      // (src/core/protocol-header.mjs) — never free text; the rest name attempts, reads, expiries,
+      // dispositions, generations and the rebind row a resolve failure belongs to.
+      header: { type: "object", properties: { verb: { type: "string" }, v: { type: "string" }, messageId: uuid, threadId: { type: "string" }, replyTo: { type: "string" }, verdict: { type: "string" } }, additionalProperties: false },
+      disposition: { type: "string" }, rebindFailedSeq: { type: "integer", minimum: 1 },
       attemptId: uuid, path: { type: "string" }, outcome: { type: "string" }, returnedId: uuid,
       receiverAlias: { type: "string" }, receiverThreadId: uuid, sourceSeq: { type: "integer", minimum: 1 },
       readerPid: { type: "integer", minimum: 1 }, generationId: uuid, daemonPid: { type: "integer", minimum: 1 }
