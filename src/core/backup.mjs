@@ -5,7 +5,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readManifests, verifyArchive, archiveNames } from "./archive.mjs";
 
-// Copies of the closed daily copies to somewhere that is not the Mini's disk: the Air over SSH
+// Copies of the closed daily copies to somewhere that is not the Mini's disk. A sleeping Air is
+// the normal failure: the attempt fails fast (ConnectTimeout), maintenance alarms once per day, and
+// the next hourly run tries again with every archive (`--ignore-existing` skips what already landed).
+// the Air over SSH
 // (`user@host:/path`) or a mounted external disk (`/Volumes/...`). Copies are made only of archives
 // that verify; a destination file that exists with the same digest is left alone and one that
 // exists with a different digest is reported, never overwritten.
@@ -25,7 +28,7 @@ export async function backupArchives({ directory, destination, exec = run }) {
     const files = good.flatMap((day) => Object.values(archiveNames(day)));
     if (files.length === 0) return { configured: true, remote: true, copied: 0, invalid };
     try {
-      await exec("/usr/bin/rsync", ["-a", "--ignore-existing", "--chmod=F600,D700", "-e", "ssh -o BatchMode=yes", ...files.map((f) => path.join(directory, f)), destination.endsWith("/") ? destination : `${destination}/`], { timeout: 120_000 });
+      await exec("/usr/bin/rsync", ["-a", "--ignore-existing", "--chmod=F600,D700", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes", ...files.map((f) => path.join(directory, f)), destination.endsWith("/") ? destination : `${destination}/`], { timeout: 120_000 });
       return { configured: true, remote: true, copied: files.length, invalid };
     } catch (error) {
       return { configured: true, remote: true, copied: 0, invalid, error: typeof error?.code === "string" || typeof error?.code === "number" ? String(error.code) : "RSYNC_FAILED" };

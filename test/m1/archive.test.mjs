@@ -77,8 +77,21 @@ test("backup over SSH is one rsync with a fixed argv that never replaces a file"
   expect(result).toMatchObject({ remote: true, copied: 4 });
   const [cmd, argv, opts] = calls[0];
   expect(cmd).toBe("/usr/bin/rsync");
-  expect(argv.slice(0, 5)).toEqual(["-a", "--ignore-existing", "--chmod=F600,D700", "-e", "ssh -o BatchMode=yes"]);
+  expect(argv.slice(0, 5)).toEqual(["-a", "--ignore-existing", "--chmod=F600,D700", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes"]);
   expect(argv.at(-1)).toBe("hyungseoklee@air:/Users/hyungseoklee/peer-archive/");
   expect(opts.shell).toBeUndefined();
   await expect(backupArchives({ directory: dir, destination: "air:/tmp;rm -rf ~" })).rejects.toThrow();
+});
+
+test("a sleeping Air fails this run and the next run sends every archive again", async () => {
+  const root = await tempRoot(); roots.push(root); const dir = path.join(root, "archive");
+  await archiveClosedDays({ directory: dir, events: rows, now: NOW });
+  let asleep = true; const calls = [];
+  const exec = async (cmd, argv) => { calls.push(argv); if (asleep) throw Object.assign(new Error("ssh: connect timed out"), { code: 255 }); return { stdout: "" }; };
+  const first = await backupArchives({ directory: dir, destination: "hyungseoklee@macbookair.tail72dd63.ts.net:/Users/hyungseoklee/universal-peer-archive", exec });
+  expect(first).toMatchObject({ remote: true, copied: 0, error: "255" });
+  asleep = false;
+  const second = await backupArchives({ directory: dir, destination: "hyungseoklee@macbookair.tail72dd63.ts.net:/Users/hyungseoklee/universal-peer-archive", exec });
+  expect(second).toMatchObject({ remote: true, copied: 4 });
+  expect(calls[1].filter((a) => a.endsWith(".gz") || a.endsWith(".json"))).toHaveLength(4);
 });

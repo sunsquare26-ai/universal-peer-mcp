@@ -24,6 +24,8 @@ const MUTANTS = [
   ["alert not deduped", "src/core/alerts.mjs", "if (this.keys.has(key)) return { raised: false, duplicate: true };", "", "test/m1/alerts.test.mjs"],
   ["no daemon_started row", "src/daemon.mjs", "await store.append(\"daemon_started\", { generationId, daemonPid: process.pid, daemonProcStart: selfProcStart, buildId: BUILD_ID });", "", "test/m1/daemon-observation.test.mjs"],
   ["trace leaks the body", "src/core/trace.mjs", "for (const key of [\"reason\", \"errorCode\",", "for (const key of [\"body\", \"bodyFile\", \"reason\", \"errorCode\",", "test/m1/trace.test.mjs"],
+  ["bridge accepts any key", "tools/alert-bridge/air-notify.sh", "[[ \"$key\" =~ ^[a-z0-9_:.-]{1,160}$ ]] || { echo \"bad key\" >&2; exit 64; }", "", "test/m1/air-notify.test.mjs"],
+  ["bridge notifies before logging", "tools/alert-bridge/air-notify.sh", "printf '%s alert kind=%s key=%s code=%s\\n' \"$now\" \"$kind\" \"$key\" \"$code\" >> \"$log\" || exit 1", "true", "test/m1/air-notify.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
 ];
 
@@ -32,7 +34,7 @@ const results = [];
 for (const [name, file, find, replace, testFile] of MUTANTS) {
   const copy = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "upm-mutant-"));
   try {
-    for (const dir of ["src", "test", "package.json"]) execFileSync("cp", ["-R", path.join(root, dir), copy]);
+    for (const dir of ["src", "test", "tools", "package.json"]) execFileSync("cp", ["-R", path.join(root, dir), copy]);
     const target = path.join(copy, file); const text = fs.readFileSync(target, "utf8");
     const count = text.split(find).length - 1;
     if (count !== 1) { results.push({ name, status: `SETUP: pattern found ${count} times` }); continue; }
