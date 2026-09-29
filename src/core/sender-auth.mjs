@@ -35,10 +35,10 @@ export function createSenderResolver({ sessionsDir = DEFAULT_SESSIONS_DIR, allow
       let row = null;
       try { row = await readRow(pid); } catch { row = null; }
       if (row) {
-        if (row.name === SELF_ROW_NAME || pid === selfPid) return { authenticated: false, reason: "self_registration", pid };
+        if (row.name === SELF_ROW_NAME || pid === selfPid) return { authenticated: false, reason: "self_registration", pid, depth };
         let live = null; try { live = normalizeProcStart(startReader(pid)); } catch {}
-        if (live === null || live !== normalizeProcStart(row.procStart)) return { authenticated: false, reason: "process_identity_changed", pid };
-        if (depth === 0 && peer.procStart && normalizeProcStart(peer.procStart) !== live) return { authenticated: false, reason: "process_identity_changed", pid };
+        if (live === null || live !== normalizeProcStart(row.procStart)) return { authenticated: false, reason: "process_identity_changed", pid, depth };
+        if (depth === 0 && peer.procStart && normalizeProcStart(peer.procStart) !== live) return { authenticated: false, reason: "process_identity_changed", pid, depth };
         const table = allowlist?.() ?? {};
         const alias = Object.keys(table).find((name) => sameUuid(table[name]?.sessionId ?? "", row.sessionId));
         if (!alias) return { authenticated: false, reason: "session_not_allowlisted", pid, sessionId: row.sessionId, procStart: row.procStart, cwd: typeof row.cwd === "string" ? row.cwd : null, depth };

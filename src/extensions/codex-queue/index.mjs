@@ -33,8 +33,11 @@ const UUID_LOWER = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const TARGET_KEYS = new Set(["transport", "cliPath", "threadId", "cwd", "socketPath", "codexVersion"]);
 const fail = (code) => Object.assign(new Error(code), { code });
 
-// Connect to the existing server only. Never spawn `codex exec`, resume a stored
-// thread into another server, or change its model, permissions, or effort.
+// Connect to the existing server only: websocket over its unix socket, carried by a node child
+// (./transport.mjs, `ws` pinned in package.json). Measured 2026-09-29: `codex app-server proxy`
+// does not answer JSON-RPC on stdio for a `--listen unix://` server, `ws` over the socket does.
+// Never spawn `codex exec`, resume a stored thread into another server, or change its model,
+// permissions, or effort.
 export function connectAppServer(socketPath, { timeoutMs = 10000 } = {}) {
   const child = spawn("node", [fileURLToPath(new URL("./transport.mjs", import.meta.url)), socketPath], { stdio: ["pipe", "pipe", "ignore"] });
   const pending = new Map(); let counter = 0; let buffer = ""; let closed = false;
@@ -48,7 +51,6 @@ export function connectAppServer(socketPath, { timeoutMs = 10000 } = {}) {
       const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
       let frame; try { frame = JSON.parse(line); } catch { rejectAll(); child.kill(); return; }
       // Leave all server-originated approvals/input requests to the owning host.
-      // Even a negative response could resolve another client's pending approval.
       if (frame.method) continue;
       const waiter = pending.get(frame.id); if (!waiter) continue;
       pending.delete(frame.id); clearTimeout(waiter.timer);
@@ -94,6 +96,9 @@ export class CodexWake {
       return entry;
     }
     if (entry.transport !== undefined && entry.transport !== "existing-app-server") throw fail("TARGET_UNAVAILABLE");
+    // The Codex CLI beside the app-server: its release is checked against the server's (inspect).
+    if (!path.isAbsolute(entry.cliPath ?? "")) throw fail("TARGET_UNAVAILABLE");
+    { const cli = await fsp.stat(entry.cliPath); if (!cli.isFile() || (cli.mode & 0o022) !== 0 || ![0, process.getuid()].includes(cli.uid)) throw fail("TARGET_UNAVAILABLE"); }
     if (!path.isAbsolute(entry.socketPath ?? "")) throw fail("TARGET_UNAVAILABLE");
     const stat = await fsp.lstat(entry.socketPath);
     if (!stat.isSocket() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) throw fail("TARGET_UNAVAILABLE");
@@ -106,6 +111,8 @@ export class CodexWake {
       const serverVersion = versionOf(init?.userAgent);
       if (!serverVersion) throw fail("VERSION_UNKNOWN");
       if (target.codexVersion && target.codexVersion !== serverVersion) throw fail("VERSION_MISMATCH");
+      // The CLI that queues or proxies and the app-server that owns the thread: one release.
+      if ((await this.cliVersion(target.cliPath)) !== serverVersion) throw fail("VERSION_MISMATCH");
       rpc.notify("initialized");
       // thread/read alone can read a persisted but unloaded thread. Never load it
       // into a different server: verify ownership in this server's loaded list.
@@ -157,8 +164,6 @@ export class CodexWake {
     try {
       const result = await this.inspect(codexAlias, async ({ rpc, thread, target, state, serverVersion }) => {
         if (target.transport === "cli-queue") {
-          const local = await this.cliVersion(target.cliPath);
-          if (local !== serverVersion) throw fail("VERSION_MISMATCH");
           attempted = true;
           await this.enqueue(target, bell);
           return { accepted: true, mode: state === "active" ? "held_behind_running_turn" : "queued", turnId: null, replay: false };

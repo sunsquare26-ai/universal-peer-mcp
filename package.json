@@ -37,5 +37,11 @@
     "test": "bun test test/*.test.mjs",
     "check": "node --check src/cli.mjs && node --check src/server.mjs && node --check src/daemon.mjs",
     "build": "bun build src/cli.mjs --target=bun --outdir=dist"
-  }
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  },
+  "bundleDependencies": [
+    "ws"
+  ]
 }

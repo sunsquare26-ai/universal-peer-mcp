@@ -25,7 +25,7 @@ test("an app-server that does not state its release is refused", async () => {
 });
 
 test("a pinned codexVersion that the app-server does not match is refused", async () => {
-  const r = await root(); await writeTargets(r, { transport: "existing-app-server", threadId: THREAD_UUID, cwd: r, socketPath: path.join(r, "s.sock"), codexVersion: "0.158.0" });
+  const r = await root(); const cli = await writeCli(r, { version: "0.159.0" }); await writeTargets(r, { transport: "existing-app-server", cliPath: cli, threadId: THREAD_UUID, cwd: r, socketPath: path.join(r, "s.sock"), codexVersion: "0.158.0" });
   const s = await import("node:net"); const server = s.createServer(() => {}); await new Promise((ok) => server.listen(path.join(r, "s.sock"), ok)); await fs.chmod(path.join(r, "s.sock"), 0o600);
   try {
     await expect(new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.159.0" }) }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
@@ -35,7 +35,8 @@ test("a pinned codexVersion that the app-server does not match is refused", asyn
 async function appServerTarget(r) {
   const net = await import("node:net"); const server = net.createServer(() => {});
   await new Promise((ok) => server.listen(path.join(r, "s.sock"), ok)); await fs.chmod(path.join(r, "s.sock"), 0o600);
-  await writeTargets(r, { transport: "existing-app-server", threadId: THREAD_UUID, cwd: r, socketPath: path.join(r, "s.sock") });
+  const cli = await writeCli(r, { version: "0.159.0" });
+  await writeTargets(r, { transport: "existing-app-server", cliPath: cli, threadId: THREAD_UUID, cwd: r, socketPath: path.join(r, "s.sock") });
   return server;
 }
 
@@ -77,4 +78,11 @@ test("versionOf reads the release out of CLI and userAgent strings", () => {
   expect(versionOf("codex-cli 0.157.0")).toBe("0.157.0");
   expect(versionOf("codex_cli_rs/0.159.0 (Mac OS 27.0.0; arm64)")).toBe("0.159.0");
   expect(versionOf("nothing")).toBeNull();
+});
+
+test("an app-server target whose proxy CLI is another release is refused", async () => {
+  const r = await root(); const server = await appServerTarget(r);
+  try {
+    await expect(new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.160.0" }) }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
+  } finally { server.close(); }
 });
