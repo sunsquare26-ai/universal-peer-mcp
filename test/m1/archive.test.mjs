@@ -75,12 +75,14 @@ test("backup over SSH is one rsync with a fixed argv that never replaces a file"
   const calls = [];
   const result = await backupArchives({ directory: dir, destination: "hyungseoklee@air:/Users/hyungseoklee/peer-archive", exec: async (...a) => { calls.push(a); return { stdout: "" }; } });
   expect(result).toMatchObject({ remote: true, copied: 4 });
-  const [cmd, argv, opts] = calls[0];
+  expect(calls[0][0]).toBe("/usr/bin/ssh");
+  expect(calls[0][1]).toEqual(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes", "hyungseoklee@air", "mkdir -p -m 700 -- /Users/hyungseoklee/peer-archive && chmod 700 -- /Users/hyungseoklee/peer-archive"]);
+  const [cmd, argv, opts] = calls[1];
   expect(cmd).toBe("/usr/bin/rsync");
-  expect(argv.slice(0, 5)).toEqual(["-a", "--ignore-existing", "--chmod=F600,D700", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes"]);
+  expect(argv.slice(0, 4)).toEqual(["-a", "--ignore-existing", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes"]);
   expect(argv.at(-1)).toBe("hyungseoklee@air:/Users/hyungseoklee/peer-archive/");
   expect(opts.shell).toBeUndefined();
-  await expect(backupArchives({ directory: dir, destination: "air:/tmp;rm -rf ~" })).rejects.toThrow();
+  for (const bad of ["air:/tmp;rm -rf ~", "u@air:/tmp/$(id)", "u@air:/a b"]) await expect(backupArchives({ directory: dir, destination: bad })).rejects.toThrow();
 });
 
 test("a sleeping Air fails this run and the next run sends every archive again", async () => {
@@ -93,5 +95,5 @@ test("a sleeping Air fails this run and the next run sends every archive again",
   asleep = false;
   const second = await backupArchives({ directory: dir, destination: "hyungseoklee@macbookair.tail72dd63.ts.net:/Users/hyungseoklee/universal-peer-archive", exec });
   expect(second).toMatchObject({ remote: true, copied: 4 });
-  expect(calls[1].filter((a) => a.endsWith(".gz") || a.endsWith(".json"))).toHaveLength(4);
+  expect(calls.at(-1).filter((a) => a.endsWith(".gz") || a.endsWith(".json"))).toHaveLength(4);
 });

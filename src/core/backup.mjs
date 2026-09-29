@@ -14,7 +14,9 @@ import { readManifests, verifyArchive, archiveNames } from "./archive.mjs";
 // exists with a different digest is reported, never overwritten.
 const run = promisify(execFile);
 const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
-const REMOTE = /^[A-Za-z0-9._-]+@?[A-Za-z0-9._-]*:\/[^\s'"`$;&|]*$/;
+// user@host:/path with nothing a remote shell would read: the path is passed to `mkdir` over ssh.
+const REMOTE = /^([A-Za-z0-9._-]+@[A-Za-z0-9.-]+):(\/[A-Za-z0-9._\/-]*)$/;
+const SSH = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes"];
 
 export async function backupArchives({ directory, destination, exec = run }) {
   if (typeof destination !== "string" || destination === "") return { configured: false };
@@ -27,8 +29,12 @@ export async function backupArchives({ directory, destination, exec = run }) {
     // rsync with a fixed argv, no shell. --ignore-existing: a file already there is never replaced.
     const files = good.flatMap((day) => Object.values(archiveNames(day)));
     if (files.length === 0) return { configured: true, remote: true, copied: 0, invalid };
+    const [, host, remotePath] = REMOTE.exec(destination);
     try {
-      await exec("/usr/bin/rsync", ["-a", "--ignore-existing", "--chmod=F600,D700", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes", ...files.map((f) => path.join(directory, f)), destination.endsWith("/") ? destination : `${destination}/`], { timeout: 120_000 });
+      // macOS ships openrsync, which has no --chmod: the files keep their 0600 through -a, and the
+      // directory is made 0700 here first (mkdir -p also creates missing parents, which rsync won't).
+      await exec("/usr/bin/ssh", [...SSH, host, `mkdir -p -m 700 -- ${remotePath} && chmod 700 -- ${remotePath}`], { timeout: 30_000 });
+      await exec("/usr/bin/rsync", ["-a", "--ignore-existing", "-e", `ssh ${SSH.join(" ")}`, ...files.map((f) => path.join(directory, f)), destination.endsWith("/") ? destination : `${destination}/`], { timeout: 120_000 });
       return { configured: true, remote: true, copied: files.length, invalid };
     } catch (error) {
       return { configured: true, remote: true, copied: 0, invalid, error: typeof error?.code === "string" || typeof error?.code === "number" ? String(error.code) : "RSYNC_FAILED" };
