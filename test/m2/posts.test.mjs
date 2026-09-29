@@ -87,6 +87,7 @@ test("injected failure: a crash before the post row is written leaves nothing pr
   const broken = Object.create(s.store); broken.appendChecked = async () => { throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); };
   await expect(acceptPost({ store: broken, spool: new InboundSpool(statePaths(s.root)), messageId: id, body, who: {}, source: "control" })).rejects.toThrow();
   expect(s.rows("peer_post")).toHaveLength(0);
+  expect(await s.files()).toBe(0);                          // review [중]: no body file without a row
   await s.store.close(); const again = await stand(s.root);
   await again.onFrame(frame(body), CLAUDE, {}); await again.onFrame(frame(body), CLAUDE, {});
   expect(again.rows("peer_post")).toHaveLength(1);

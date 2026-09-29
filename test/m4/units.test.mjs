@@ -108,6 +108,12 @@ test("frame PEER_POST with to=<alias> lands in that inbox only; without it, in n
     expect(inbox(store.events, "codex-review").map((e) => e.messageId)).toEqual([a]);
     expect(inbox(store.events, "codex-main")).toEqual([]);
     expect(unaddressed(store.events).map((e) => e.messageId)).toEqual([b]);
+    // bound to the session the alias names when the frame is accepted
+    const bound = new PeerCore({ targets: {}, store, address: "uds:/tmp/cc-socks/x.sock", inboundSpool: new InboundSpool(statePaths(root)), senderResolver: async (p) => ({ authenticated: true, alias: "friday-main", sessionId: MAIN, pid: p.pid, procStart: p.procStart }), postRecipientFields: (alias) => (alias === "codex-review" ? { recipientKind: "codex", recipientThreadId: T } : {}) });
+    const c = crypto.randomUUID();
+    await frameObserver({ core: bound, store })(frame(`PEER_POST v=1 message_id=${c} to=codex-review\n본문`), peer, {});
+    expect(store.events.find((e) => e.type === "peer_post" && e.messageId === c)).toMatchObject({ recipient: "codex-review", recipientThreadId: T });
+    expect(inbox(store.events, "codex-review", { lineage: new Set([`codex:${T}`]) }).map((e) => e.messageId)).toEqual([c]);
     await store.close();
   } finally { await fsp.rm(root, { recursive: true, force: true }); }
 });

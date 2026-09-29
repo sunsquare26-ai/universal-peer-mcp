@@ -30,8 +30,10 @@ import { maintenanceConfig, MAINTENANCE_INTERVAL_MS, runMaintenance } from "./co
 import { dayOf } from "./core/days.mjs";
 import { loadSettings, settingsStatus } from "./core/settings.mjs";
 import { createSenderResolver } from "./core/sender-auth.mjs";
-import { acceptPost, ackInbox, bodyDigest, inbox, linkUnmatched, recipientMessageId } from "./core/posts.mjs";
+import { acceptPost, ackInbox, bodyDigest, heldPosts, inbox, linkUnmatched, recipientMessageId, relinkPost, sessionLineage } from "./core/posts.mjs";
+import { LEGACY_BODIES, LEGACY_BODIES_WARNING } from "./core/settings.mjs";
 import { createCodexResolver } from "./core/codex-identity.mjs";
+import { sweepOrphanBodies } from "./core/orphans.mjs";
 import { aliasOfCodexThread, codexPeersDigest, codexPeersPath, identityKey, listPeers, loadCodexPeers, registerPeer, removePeer, resolvePeer } from "./core/peer-directory.mjs";
 import { processParent, provePermissionMode, readProcessArgv } from "./adapters/claude-native-v1/darwin-procargs.mjs";
 import { readRebindState } from "./core/rebind-sidecar.mjs";
@@ -100,6 +102,9 @@ const store = new EventStore(paths, { onPoisoned: (health) => alerts.raise({ kin
 await store.init();
 await store.append("daemon_started", { generationId, daemonPid: process.pid, daemonProcStart: selfProcStart, buildId: BUILD_ID, settings: settingsStatus(settings) });
 if (settings.invalid) { process.stderr.write(`universal-peer: ${paths.root}/config.json ignored (${settings.invalid}); alerts and backup not configured\n`); await store.append("daemon_config_invalid", { reason: settings.invalid }).catch(() => {}); }
+// Body files no row names (a spool write whose row failed) are moved aside before anything can
+// arrive, so a crash between the two never leaves a body outside retention (src/core/orphans.mjs).
+await sweepOrphanBodies({ root: paths.root, store, alerts, graceMs: 0 }).catch(() => {});
 // Which reader has already been served which body, so a read is recorded once per reader process.
 const bodyReads = new Set(store.events.filter((row) => row.type === "inbound_body_read").map((row) => `${row.sourceSeq}|${row.readerPid}|${row.readerProcStart}`));
 let maintenance = { lastRun: null, running: false };
@@ -144,7 +149,7 @@ const rebindTarget = createSessionRebinder({
 // kernel pid, Claude Code's registry row and the operator's table (src/core/sender-auth.mjs).
 const resolveSender = createSenderResolver({ allowlist: () => targets, selfPid: process.pid, ...(claudeSessionsDir ? { sessionsDir: claudeSessionsDir } : {}) });
 const resolveCodex = createCodexResolver();
-core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, rebind: rebindTarget, senderResolver: (peer) => resolveSender(peer) });
+core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, rebind: rebindTarget, senderResolver: (peer) => resolveSender(peer), postRecipientFields: (alias) => recipientFieldsOf(resolvePeer(alias, { claude: targets, codex: codexPeers })) });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
 if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });
 const token = crypto.randomBytes(32).toString("hex"); let closing = false;
@@ -225,7 +230,7 @@ async function refreshTargets() {
 async function dispatch(method, args, caller = null) {
   if (method === "peer_targets") return core.targetsList();
   if (method === "peer_status") return core.status(args.alias);
-  if (method === "peer_send") return withInlineBodies(await core.send(publicSendArgs(args)), caller, method);
+  if (method === "peer_send") { const sent = await core.send(publicSendArgs(args)); await recordRequester(sent?.messageId ?? args.messageId, caller); return withInlineBodies(sent, caller, method); }
   if (method === "peer_wait") return withInlineBodies(await core.wait(args), caller, method);
   if (method === "peer_list_events") { const listing = core.events(args); return withInlineBodies({ ...listing, events: listing.events.map(publicLedgerEvent) }, caller, method); }
   if (method === "trace_attempt") return recordAttempt(store, args);
@@ -234,7 +239,8 @@ async function dispatch(method, args, caller = null) {
   if (method === "peer_inbox_ack") return ackOwnInbox(args, caller);
   if (method === "peer_register") return register(args, caller);
   if (method === "peer_unregister") return unregister(args, caller);
-  if (method === "peer_directory") return { peers: listPeers({ claude: targets, codex: codexPeers }) };
+  if (method === "peer_directory") return directory();
+  if (method === "peer_post_relink") return relink(args, caller);
   if (method === "peer_whoami") { const who = await identifyCaller(caller); return who.authenticated ? { authenticated: true, alias: who.alias, kind: who.kind } : { authenticated: false, kind: who.kind ?? null, reason: who.reason, ...(who.rebind ? { rebind: who.rebind } : {}) }; }
   if (method === "peer_link_unmatched") return linkUnmatched(store, { sourceSeq: args.sourceSeq, messageId: args.messageId, as: args.as, verdict: args.verdict ?? null, by: { linkedByPid: caller?.pid } });
   if (method === "inbound_body_dispose") return disposeInboundBody({ root: paths.root, store, sourceSeq: args.sourceSeq, disposition: args.disposition });
@@ -264,7 +270,17 @@ async function dispatch(method, args, caller = null) {
 // body is missing.
 async function withInlineBodies(result, caller = null, method = null) {
   if (!result || !Array.isArray(result.events)) return result;
-  const events = await hydrateInboundBodies(result.events, { root: paths.root, expired: expiredBodyFiles(store.events) });
+  // M4 review [상]2: bodies leave only through the reader's own path. The authenticated inbox has
+  // already been filtered to the caller's session. Every other answer (peer_wait, peer_list_events,
+  // a peer_send replay) is metadata, except the ACK/reply to a request this same process sent
+  // (the legacy peer_send → peer_wait path). The compatibility window restores the old behaviour.
+  const open = method === "peer_inbox" || settings[LEGACY_BODIES].value;
+  const withheld = new Map();
+  const input = open ? result.events : result.events.map((row, index) => {
+    if (typeof row?.bodyFile !== "string" || ownReply(row, caller)) return row;
+    withheld.set(index, row.bodyFile); const { bodyFile, ...rest } = row; return rest;
+  });
+  const events = (await hydrateInboundBodies(input, { root: paths.root, expired: expiredBodyFiles(store.events) })).map((row, index) => (withheld.has(index) ? { ...row, bodyFile: withheld.get(index), bodyInlineOmitted: "not_for_this_reader" } : row));
   await recordBodyReads(events, caller, method);
   if (!result.event || typeof result.event.seq !== "number") return { ...result, events };
   const hydrated = events.find((row) => row.seq === result.event.seq);
@@ -296,7 +312,7 @@ async function post(args, caller) {
     if (deliveredTo.has(key)) { results.push({ recipient, state: "same_session", deliveredAs: deliveredTo.get(key) }); continue; }
     deliveredTo.set(key, recipient);
     const messageId = recipientMessageId(groupId, recipient);
-    const recipientFields = { recipientKind: peer.kind, ...(peer.kind === "claude" ? { recipientSessionId: peer.sessionId } : { recipientThreadId: peer.threadId }) };
+    const recipientFields = recipientFieldsOf(peer);
     results.push({ recipient, messageId, ...(await acceptPost({ store, spool: inboundSpool, messageId, recipient, body: args.body, who: { ...who, ...recipientFields }, source: "control" })) });
   }
   return { groupId, from: auth.alias, results };
@@ -382,13 +398,14 @@ async function readInbox(args, caller) {
   const who = await identifyCaller(caller);
   if (!who.authenticated) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason}); register first: universal-peer-mcp register --alias <name>`), { code: "SENDER_UNAUTHENTICATED" });
   if (args.recipient !== undefined && args.recipient !== who.alias) { await store.append("peer_inbox_refused", { reason: "not_own_inbox", readerAlias: who.alias, readerPid: caller?.pid }).catch(() => {}); throw Object.assign(new Error(`this session is ${who.alias}; it cannot read another peer's inbox`), { code: "RECIPIENT_MISMATCH" }); }
-  return withInlineBodies({ alias: who.alias, events: inbox(store.events, who.alias, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0 }) }, caller, "peer_inbox");
+  return withInlineBodies({ alias: who.alias, events: inbox(store.events, who.alias, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0, lineage: lineageOf(who) }) }, caller, "peer_inbox");
 }
 async function ackOwnInbox(args, caller) {
   const who = await identifyCaller(caller);
   if (!who.authenticated) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason})`), { code: "SENDER_UNAUTHENTICATED" });
   const row = store.events.find((e) => e.type === "peer_post" && typeof args.messageId === "string" && e.messageId === args.messageId.toLowerCase());
   if (row && row.recipient !== who.alias) throw Object.assign(new Error(`message ${args.messageId} is not addressed to ${who.alias}`), { code: "NOT_RECIPIENT" });
+  if (row && inbox(store.events, who.alias, { lineage: lineageOf(who) }).every((e) => e.messageId !== row.messageId) && !store.events.some((e) => e.type === "peer_post_processed" && e.messageId === row.messageId)) throw Object.assign(new Error(`message ${args.messageId} was for the session ${who.alias} named before; it is held for the Owner`), { code: "NOT_RECIPIENT" });
   return ackInbox(store, { messageId: args.messageId, reader: { readerPid: caller?.pid, readerProcStart: caller?.procStart, readerAlias: who.alias } });
 }
 
@@ -427,6 +444,48 @@ async function unregister(args, caller) {
   await refreshTargets();
   await store.append("peer_unregistered", { alias: result.alias, kind: result.kind, peerPid: caller?.pid });
   return result;
+}
+
+// The process that asked (peer_send) is the one a reply's body is for. First requester wins; a
+// replay from another process does not take it over.
+async function recordRequester(messageId, caller) {
+  if (typeof messageId !== "string" || !Number.isInteger(caller?.pid)) return;
+  if (store.events.some((e) => e.type === "send_requester" && e.messageId === messageId.toLowerCase())) return;
+  await store.append("send_requester", { messageId: messageId.toLowerCase(), requesterPid: caller.pid, requesterProcStart: caller.procStart }).catch(() => {});
+}
+function ownReply(row, caller) {
+  if (!["peer_ack", "peer_reply"].includes(row?.type) || typeof row.messageId !== "string" || !Number.isInteger(caller?.pid)) return false;
+  const asked = store.events.find((e) => e.type === "send_requester" && e.messageId === row.messageId.toLowerCase());
+  return Boolean(asked) && asked.requesterPid === caller.pid && normalizeProcStart(asked.requesterProcStart) === normalizeProcStart(caller.procStart);
+}
+function recipientFieldsOf(peer) {
+  if (!peer) return {};
+  return { recipientKind: peer.kind, ...(peer.kind === "claude" ? { recipientSessionId: peer.sessionId } : { recipientThreadId: peer.threadId }) };
+}
+function lineageOf(who) { return sessionLineage(store.events, who.alias, who.kind === "claude" ? { kind: "claude", sessionId: who.sessionId } : { kind: "codex", threadId: who.threadId }); }
+// The directory, with what each alias's current session may not read: posts that were waiting for a
+// session the alias no longer names (moved with --replace). Counts only; bodies stay put.
+function directory() {
+  const peers = listPeers({ claude: targets, codex: codexPeers }).map((peer) => {
+    const lineage = sessionLineage(store.events, peer.alias, peer.kind === "claude" ? { kind: "claude", sessionId: peer.sessionId } : { kind: "codex", threadId: peer.threadId });
+    const held = heldPosts(store.events, peer.alias, lineage).length;
+    return held ? { ...peer, heldForPreviousSession: held } : peer;
+  });
+  const registered = new Set(peers.map((p) => p.alias));
+  const processed = new Set(store.events.filter((e) => e.type === "peer_post_processed").map((e) => e.messageId));
+  const unregisteredHeld = store.events.filter((e) => e.type === "peer_post" && e.recipient !== "*" && !registered.has(e.recipient) && !processed.has(e.messageId)).length;
+  return { peers, ...(unregisteredHeld ? { heldForUnregistered: unregisteredHeld } : {}), ...(settings[LEGACY_BODIES].value ? { warning: LEGACY_BODIES_WARNING } : {}) };
+}
+// The Owner re-addresses one held post to the alias's current session. A registered session may not
+// do this for itself: that would be the takeover this rule exists to stop.
+async function relink(args, caller) {
+  if (!args || typeof args.messageId !== "string" || Object.keys(args).some((k) => k !== "messageId")) throw Object.assign(new Error("peer_post_relink takes messageId"), { code: "INVALID_CONTROL_ARGUMENTS" });
+  const who = await identifyCaller(caller);
+  if (who.authenticated) throw Object.assign(new Error("only the Owner's terminal (not a registered session) may re-address a held message"), { code: "OWNER_ONLY" });
+  const post = store.events.find((e) => e.type === "peer_post" && e.messageId === args.messageId.toLowerCase());
+  const peer = post ? resolvePeer(post.recipient, { claude: targets, codex: codexPeers }) : null;
+  if (post && !peer) throw Object.assign(new Error(`${post.recipient} is not registered now`), { code: "UNKNOWN_RECIPIENT" });
+  return relinkPost(store, { messageId: args.messageId.toLowerCase(), identity: peer ?? { kind: "codex", threadId: null }, by: { relinkedByPid: caller?.pid } });
 }
 
 // "Receiver read" for M1: a body handed out inline to a caller process is a read by that process.

@@ -30,6 +30,7 @@ export async function loadSettings({ root, env = process.env }) {
     const parsed = JSON.parse(await fsp.readFile(file, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw Object.assign(new Error("not an object"), { reason: "not_an_object" });
     for (const [key, value] of Object.entries(parsed)) {
+      if (key === LEGACY_BODIES) { if (typeof value !== "boolean") throw Object.assign(new Error("bad value"), { reason: `invalid_${key}` }); continue; }
       if (!(key in KEYS)) throw Object.assign(new Error("unknown key"), { reason: "unknown_key" });
       if (!valid[key](value)) throw Object.assign(new Error("bad value"), { reason: `invalid_${key}` });
     }
@@ -45,12 +46,18 @@ export async function loadSettings({ root, env = process.env }) {
     if (typeof fromEnv === "string" && fromEnv !== "" && valid[key](fromEnv)) { out[key] = { value: fromEnv, source: "env" }; continue; }
     out[key] = { value: null, source: "default" };
   }
+  // The compatibility window (M4 review [상]2): while true, the diagnostic answers (peer_wait,
+  // peer_list_events, a peer_send replay) keep handing out every row's body as before M4. File only,
+  // never the environment, and anything but a literal `true` — including a broken file — is off.
+  out[LEGACY_BODIES] = { value: !invalid && fromFile?.[LEGACY_BODIES] === true, source: !invalid && fromFile?.[LEGACY_BODIES] !== undefined ? "file" : "default" };
   return out;
 }
+export const LEGACY_BODIES = "legacyBodiesInDiagnostics";
+export const LEGACY_BODIES_WARNING = "진단 본문 노출 호환창 켜짐";
 
 // What daemon_status shows: "configured(file)", "configured(env)", "not_configured(default)" or
 // "not_configured(config_invalid)". Never the value itself (it is a path).
 export function settingsStatus(settings) {
   const show = (s) => (s.value ? `configured(${s.source})` : `not_configured(${s.source})`);
-  return { alert: show(settings.alertCommand), backup: show(settings.archiveBackup), ...(settings.invalid ? { configError: settings.invalid } : {}) };
+  return { alert: show(settings.alertCommand), backup: show(settings.archiveBackup), ...(settings.invalid ? { configError: settings.invalid } : {}), ...(settings[LEGACY_BODIES]?.value ? { legacyBodiesInDiagnostics: true, warning: LEGACY_BODIES_WARNING } : {}) };
 }

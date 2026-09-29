@@ -30,7 +30,7 @@ export class PeerCore extends EventEmitter {
   // The capabilities a caller can ask about without constructing anything.
   static capabilities = CORE_CAPABILITIES;
 
-  constructor({ targets, store, address, resolver = resolveTarget, sender = directSend, resolverOptions = {}, onCorrelatedReply = null, inboundSpool = null, rebind = null, senderResolver = null }) {
+  constructor({ targets, store, address, resolver = resolveTarget, sender = directSend, resolverOptions = {}, onCorrelatedReply = null, inboundSpool = null, rebind = null, senderResolver = null, postRecipientFields = null }) {
     super(); this.targets = targets; this.store = store; this.address = address; this.resolver = resolver; this.sender = sender; this.resolverOptions = resolverOptions; this.sendLocks = new Map(); this.sendContext = new AsyncLocalStorage();
     // Succession is opt-in at construction and there is no default. A core built without it resolves
     // exactly as it always did — one id, one live row, or a refusal — because the half of succession
@@ -52,6 +52,9 @@ export class PeerCore extends EventEmitter {
     // or unauthenticated, which is the pre-M2 behaviour the older tests describe.
     if (senderResolver !== null && typeof senderResolver !== "function") throw codedError("INVALID_SENDER_RESOLVER", "senderResolver must be a function");
     this.senderResolver = senderResolver;
+    // M4: which session a frame's `to=<alias>` names at the moment it is accepted (the daemon's
+    // directory). A post is bound to that session, not to the name (src/core/posts.mjs).
+    this.postRecipientFields = typeof postRecipientFields === "function" ? postRecipientFields : null;
   }
 
   // The list under a name rather than the bare list: an array root is not a legal
@@ -241,7 +244,8 @@ export class PeerCore extends EventEmitter {
       const header = protocolHeader(content);
       if (header?.verb === "PEER_POST" && header.messageId) {
         if (unauthenticated) { await quarantine(this.store, { reason: "sender_unauthenticated", content, header, who }); return null; }
-        await acceptPost({ store: this.store, spool: this.inboundSpool, messageId: header.messageId, recipient: postRecipient(content), body: content, who, source: "frame" });
+        const recipient = postRecipient(content);
+        await acceptPost({ store: this.store, spool: this.inboundSpool, messageId: header.messageId, recipient, body: content, who: { ...who, ...(recipient !== "*" ? this.postRecipientFields?.(recipient) ?? {} : {}) }, source: "frame" });
         return null;
       }
       if (unauthenticated) { await quarantine(this.store, { reason: "sender_unauthenticated", content, header, who }); return null; }

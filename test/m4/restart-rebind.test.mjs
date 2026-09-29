@@ -66,7 +66,7 @@ test("unclear inheritance is refused by name: /clear in the same process, --fork
   expect((await c2.run(["whoami"])).json.alias).toBe("test-claude-2");
 });
 
-test("Codex: moving an alias to a new thread by hand hands over the undelivered mail; a daemon restart keeps every session's state", async () => {
+test("Codex: a new thread that takes the alias with --replace does not get the old thread's mail; a daemon restart keeps every session's state", async () => {
   const { L, c1, x1 } = await setup();
   const m1 = await c1.run(["post", "--to", "test-codex-1", "--body-file", await writeBody(L, "one")]);
   const m2 = await c1.run(["post", "--to", "test-codex-1", "--body-file", await writeBody(L, "two")]);
@@ -75,8 +75,7 @@ test("Codex: moving an alias to a new thread by hand hands over the undelivered 
   expect((await x2.run(["register", "--alias", "test-codex-1", "--replace"])).json.replaced).toEqual([{ alias: "test-codex-1", kind: "codex" }]);
   expect((await x1.run(["inbox"])).error).toMatchObject({ code: "SENDER_UNAUTHENTICATED" });
   await stopDaemon(L.root);                                        // daemon restart
-  const box = (await x2.run(["inbox"])).json.events;              // starts a new daemon on the same state
-  expect(box.map((e) => e.messageId)).toEqual([m2.json.results[0].messageId]);
-  expect((await x2.run(["inbox-ack", "--message-id", m1.json.results[0].messageId])).json.already).toBe(true);
+  expect((await x2.run(["inbox"])).json.events).toEqual([]);       // starts a new daemon on the same state
+  expect((await x2.run(["inbox-ack", "--message-id", m2.json.results[0].messageId])).error).toMatchObject({ code: "NOT_RECIPIENT" });
   expect((await c1.run(["whoami"])).json.alias).toBe("test-claude-1");
 });

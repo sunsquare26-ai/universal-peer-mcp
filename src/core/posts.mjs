@@ -60,8 +60,10 @@ export async function acceptPost({ store, spool, messageId, recipient = "*", bod
   try {
     row = await store.appendChecked("peer_post", { messageId, recipient, header: { verb: "PEER_POST", v: "1", messageId }, source, ...spooled, ...who }, (events) => (firstPost(events, messageId) ? refuse("POST_RACE", "lost the race") : null));
   } catch (error) {
+    // No row names the file, so nothing else will ever find it: it goes now, or onto the recovery
+    // list that startup and maintenance sweep (src/core/orphans.mjs).
+    if (spooled.bodyFile) await discardSpooled(store.paths.root, spooled.bodyFile, error.code === "POST_RACE" ? "post_race" : "append_failed");
     if (error.code !== "POST_RACE") throw error;
-    if (spooled.bodyFile) await fsp.unlink(path.join(store.paths.root, spooled.bodyFile)).catch(() => {});
     return outcomeFor(firstPost(store.events, messageId));
   }
   for (const q of store.events.filter((e) => e.type === "peer_frame_quarantined" && e.bodySha256 === row.bodySha256)) {
@@ -73,10 +75,77 @@ export async function acceptPost({ store, spool, messageId, recipient = "*", bod
 // M4: an inbox holds only posts addressed to that alias. A post with no recipient ("*", a frame
 // without `to=`) is held unaddressed and shown to no session: with several sessions reading, "anyone"
 // would mean "whoever acks first" and a second reader processing it too.
-export function inbox(events, recipient, { afterSeq = 0 } = {}) {
+//
+// M4 (review [상]1): an alias is a name, a post is for a *session*. Each post is bound to the session
+// the alias named when it was accepted (recipientSessionId / recipientThreadId). A reader sees it only
+// when that session is in its lineage: itself, or a session it succeeded by a proven resume
+// (target_rebound / peer_session_rebound rows). `register --replace` is not a succession, so a
+// different session taking the alias never reads what was waiting for the one before; those posts
+// are held (counted in `peers`) until the Owner re-addresses one by hand (`relinkPost`).
+export function inbox(events, recipient, { afterSeq = 0, lineage = null } = {}) {
   const processed = new Set(events.filter((e) => e.type === "peer_post_processed").map((e) => e.messageId.toLowerCase()));
-  return events.filter((e) => e.type === "peer_post" && e.seq > afterSeq && e.recipient === recipient && !processed.has(e.messageId.toLowerCase()));
+  const bindings = lineage ? postBindings(events) : null;
+  return events.filter((e) => e.type === "peer_post" && e.seq > afterSeq && e.recipient === recipient && !processed.has(e.messageId.toLowerCase())
+    && (lineage === null || lineage.has(bindings.get(e.messageId.toLowerCase()) ?? "")));
 }
+
+export function bindingKey(kind, id) { return typeof id === "string" && id ? `${kind}:${id.toLowerCase()}` : null; }
+function rowBinding(row) {
+  if (typeof row.recipientSessionId === "string") return bindingKey("claude", row.recipientSessionId);
+  if (typeof row.recipientThreadId === "string") return bindingKey("codex", row.recipientThreadId);
+  return null;
+}
+// messageId → the session key it is bound to now (the accepted row, or the Owner's last relink).
+export function postBindings(events) {
+  const out = new Map();
+  for (const e of events) {
+    if (e.type === "peer_post" && typeof e.messageId === "string") out.set(e.messageId.toLowerCase(), rowBinding(e));
+    else if (e.type === "peer_post_relinked" && typeof e.messageId === "string") out.set(e.messageId.toLowerCase(), rowBinding(e));
+  }
+  return out;
+}
+// The sessions whose mail `identity` inherits under `alias`: itself and every predecessor it (or a
+// predecessor) proved it resumed. Codex has no resume proof, so a thread's lineage is the thread.
+export function sessionLineage(events, alias, identity) {
+  const start = identity.kind === "claude" ? bindingKey("claude", identity.sessionId) : bindingKey("codex", identity.threadId);
+  const lineage = new Set(start ? [start] : []);
+  if (identity.kind !== "claude") return lineage;
+  const edges = [];
+  for (const e of events) {
+    if (e.type === "target_rebound" && e.alias === alias && typeof e.observedSessionId === "string" && typeof e.expectedSessionId === "string") edges.push([e.observedSessionId.toLowerCase(), e.expectedSessionId.toLowerCase()]);
+    if (e.type === "peer_session_rebound" && e.alias === alias && typeof e.sessionId === "string" && typeof e.previousSessionId === "string") edges.push([e.sessionId.toLowerCase(), e.previousSessionId.toLowerCase()]);
+  }
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [to, from] of edges) if (lineage.has(`claude:${to}`) && !lineage.has(`claude:${from}`)) { lineage.add(`claude:${from}`); grew = true; }
+  }
+  return lineage;
+}
+// Unprocessed posts addressed to `alias` that its current session may not read.
+export function heldPosts(events, alias, lineage) {
+  const processed = new Set(events.filter((e) => e.type === "peer_post_processed").map((e) => e.messageId.toLowerCase()));
+  const bindings = postBindings(events);
+  return events.filter((e) => e.type === "peer_post" && e.recipient === alias && !processed.has(e.messageId.toLowerCase()) && !lineage.has(bindings.get(e.messageId.toLowerCase()) ?? ""));
+}
+// The Owner's hand: bind one held post to the session that holds its alias now. Never automatic.
+export async function relinkPost(store, { messageId, identity, by = {} }) {
+  if (!UUID.test(messageId ?? "")) throw refuse("INVALID_CONTROL_ARGUMENTS", "messageId must be a lowercase uuid");
+  const post = firstPost(store.events, messageId);
+  if (!post) throw refuse("POST_UNKNOWN", "no accepted post with that id");
+  if (store.events.some((e) => e.type === "peer_post_processed" && sameUuid(e.messageId, messageId))) throw refuse("ALREADY_PROCESSED", "already processed");
+  const fields = identity.kind === "claude" ? { recipientSessionId: identity.sessionId } : { recipientThreadId: identity.threadId };
+  const row = await store.append("peer_post_relinked", { messageId, recipient: post.recipient, previous: postBindings(store.events).get(messageId) ?? null, ...fields, ...by });
+  return { relinked: true, seq: row.seq, recipient: post.recipient };
+}
+
+async function discardSpooled(root, bodyFile, reason) {
+  try { await fsp.unlink(path.join(root, bodyFile)); }
+  catch (error) {
+    if (error?.code === "ENOENT") return;
+    await fsp.appendFile(path.join(root, ORPHAN_LIST), `${JSON.stringify({ bodyFile, reason, at: new Date().toISOString() })}\n`, { mode: 0o600 }).catch(() => {});
+  }
+}
+export const ORPHAN_LIST = "inbound-orphans.jsonl";
 export function unaddressed(events) {
   return events.filter((e) => e.type === "peer_post" && e.recipient === "*");
 }

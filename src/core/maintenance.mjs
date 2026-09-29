@@ -2,6 +2,7 @@ import path from "node:path";
 import { archiveClosedDays } from "./archive.mjs";
 import { backupArchives } from "./backup.mjs";
 import { DEFAULT_BODY_RETENTION_DAYS, expireInboundBodies } from "./retention.mjs";
+import { sweepOrphanBodies } from "./orphans.mjs";
 
 // The daily housekeeping the daemon runs (hourly check, work only when a day has closed):
 // closed copies first, then the body expiry, then the off-machine backup. It never touches the
@@ -42,6 +43,8 @@ export async function runMaintenance({ root, store, alerts, now = Date.now(), co
       if (report.expiry.stoppedBy) await alarm("retention_stopped", `retention_stopped:${report.at.slice(0, 10)}`, report.expiry.stoppedBy);
     } catch (error) { report.errors.push({ step: "expiry", code: codeOf(error) }); await alarm("retention_stopped", `retention_stopped:${report.at.slice(0, 10)}`, codeOf(error)); }
   }
+  try { report.orphans = await sweepOrphanBodies({ root, store, alerts, now }); }
+  catch (error) { report.errors.push({ step: "orphans", code: codeOf(error) }); }
   if (config.backupDestination) {
     try {
       report.backup = await backup({ directory, destination: config.backupDestination });

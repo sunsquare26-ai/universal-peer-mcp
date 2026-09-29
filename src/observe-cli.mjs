@@ -9,7 +9,7 @@ import { sendDoorbell } from "./core/doorbell.mjs";
 // `universal-peer-mcp doorbell --thread <uuid> --message-id <uuid> [--alias <alias>]`
 // `universal-peer-mcp body-dispose --seq <n> --disposition processed|discard`
 // `universal-peer-mcp post --to a[,b] --body-file f [--group-id uuid]` | `inbox --recipient a` | `inbox-ack --message-id id`
-// `universal-peer-mcp register --alias <name> [--replace]` | `unregister --alias <name>` | `peers` | `whoami`   (M4)
+// `universal-peer-mcp register --alias <name> [--replace]` | `unregister --alias <name>` | `peers` | `whoami` | `link --post <id>`   (M4)
 // `universal-peer-mcp link --seq <n> --message-id <request id> --as ack|reply [--verdict pass|fail]`
 //
 // With --ledger the file is read directly, read-only, and no daemon is contacted — the way to read
@@ -85,6 +85,8 @@ export async function observeCommand(command, args) {
   if (command === "inbox-ack") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_inbox_ack", { messageId: option(args, "--message-id") }); }
   if (command === "link") {
     const { controlCall } = await import("./core/control.mjs");
+    // M4: `link --post <messageId>` re-addresses a held post to its alias's current session (Owner only).
+    if (option(args, "--post")) return controlCall("peer_post_relink", { messageId: option(args, "--post") });
     return controlCall("peer_link_unmatched", { sourceSeq: Number(option(args, "--seq")), messageId: option(args, "--message-id"), as: option(args, "--as"), ...(option(args, "--verdict") ? { verdict: option(args, "--verdict") } : {}) });
   }
   throw new Error("unknown command");

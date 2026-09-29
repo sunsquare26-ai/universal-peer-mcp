@@ -34,7 +34,7 @@ const MUTANTS = [
   ["header keeps a non-protocol line", "src/core/protocol-header.mjs", "if (!HEADER_VERBS.includes(verb)) return null;", "if (!HEADER_VERBS.includes(verb)) return { verb: line };", "test/m1/protocol-header.test.mjs"],
   ["spool stores the first line", "src/core/inbound-spool.mjs", "const header = protocolHeader(body); return header === null ? {} : { header };", "return { firstLine: body.split(\"\\n\")[0] };", "test/m1/retention.test.mjs"],
   // M2
-  ["forged post accepted", "src/core/peer-core.mjs", "if (unauthenticated) { await quarantine(this.store, { reason: \"sender_unauthenticated\", content, header, who }); return null; }\n        await acceptPost(", "await acceptPost(", "test/m2/posts.test.mjs"],
+  ["forged post accepted", "src/core/peer-core.mjs", "if (unauthenticated) { await quarantine(this.store, { reason: \"sender_unauthenticated\", content, header, who }); return null; }\n        const recipient = postRecipient(content);", "const recipient = postRecipient(content);", "test/m2/posts.test.mjs"],
   ["other session allowlisted", "src/core/sender-auth.mjs", "if (!alias) return { authenticated: false, reason: \"session_not_allowlisted\", pid, sessionId: row.sessionId, procStart: row.procStart, cwd: typeof row.cwd === \"string\" ? row.cwd : null, depth };", "if (!alias) return { authenticated: true, alias: \"friday-main\", sessionId: row.sessionId, pid, procStart: row.procStart, depth };", "test/m2/sender-auth.test.mjs"],
   ["recycled pid accepted", "src/core/sender-auth.mjs", "if (live === null || live !== normalizeProcStart(row.procStart)) return", "if (false) return", "test/m2/sender-auth.test.mjs"],
   ["concurrent duplicate becomes a second post", "src/core/posts.mjs", "(events) => (firstPost(events, messageId) ? refuse(\"POST_RACE\", \"lost the race\") : null)", "() => null", "test/m2/posts.test.mjs"],
@@ -53,9 +53,9 @@ const MUTANTS = [
   ,
   // M4
   ["unaddressed post shown to every inbox", "src/core/posts.mjs", "e.seq > afterSeq && e.recipient === recipient && !processed", "e.seq > afterSeq && (e.recipient === recipient || e.recipient === \"*\") && !processed", "test/m4/units.test.mjs"],
-  ["frame recipient ignored", "src/core/peer-core.mjs", "recipient: postRecipient(content), ", "", "test/m4/units.test.mjs"],
+  ["frame recipient ignored", "src/core/peer-core.mjs", "const recipient = postRecipient(content);", "const recipient = \"*\";", "test/m4/units.test.mjs"],
   ["read another session's inbox", "src/daemon.mjs", "if (args.recipient !== undefined && args.recipient !== who.alias) {", "if (false) {", "test/m4/multi-session.test.mjs"],
-  ["ack another session's message", "src/daemon.mjs", "if (row && row.recipient !== who.alias) throw", "if (false) throw", "test/m4/multi-session.test.mjs"],
+  ["ack another session's message", "src/daemon.mjs", "const row = store.events.find((e) => e.type === \"peer_post\" && typeof args.messageId === \"string\" && e.messageId === args.messageId.toLowerCase());", "const row = null;", "test/m4/multi-session.test.mjs"],
   ["unknown recipient half-sent", "src/daemon.mjs", "if (unknown.length) {", "if (false) {", "test/m4/multi-session.test.mjs"],
   ["one session gets a group twice", "src/daemon.mjs", "if (deliveredTo.has(key)) {", "if (false) {", "test/m4/multi-session.test.mjs"],
   ["unauthenticated reader served", "src/daemon.mjs", "if (!who.authenticated) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason}); register first", "if (false) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason}); register first", "test/m4/multi-session.test.mjs"],
@@ -70,6 +70,20 @@ const MUTANTS = [
   ["fork inherited on read", "src/daemon.mjs", "if (claims.fork) return fail(", "if (false) return fail(", "test/m4/restart-rebind.test.mjs"],
   ["restarted session not rebound", "src/daemon.mjs", "    const rebound = await rebindCaller(claude);\n", "    const rebound = null;\n", "test/m4/restart-rebind.test.mjs"],
   ["codex caller never proven", "src/daemon.mjs", "  const codex = resolveCodex(caller?.pid);\n", "  const codex = { proven: false, reason: \"no_codex_thread\" };\n", "test/m4/registration.test.mjs"]
+  ,
+  // M4 review fixes
+  ["new holder reads the old session's mail", "src/daemon.mjs", ", lineage: lineageOf(who) }) }, caller, \"peer_inbox\");", ", lineage: null }) }, caller, \"peer_inbox\");", "test/m4/review-fixes.test.mjs"],
+  ["new holder acks the old session's mail", "src/daemon.mjs", "if (row && inbox(store.events, who.alias, { lineage: lineageOf(who) })", "if (false && row && inbox(store.events, who.alias, { lineage: lineageOf(who) })", "test/m4/review-fixes.test.mjs"],
+  ["a session relinks mail to itself", "src/daemon.mjs", "if (who.authenticated) throw Object.assign(new Error(\"only the Owner's", "if (false) throw Object.assign(new Error(\"only the Owner's", "test/m4/review-fixes.test.mjs"],
+  ["resume does not inherit", "src/core/posts.mjs", "{ lineage.add(`claude:${from}`); grew = true; }", "{ grew = false; }", "test/m4/review-fixes.test.mjs"],
+  ["frame post unbound", "src/core/peer-core.mjs", "...(recipient !== \"*\" ? this.postRecipientFields?.(recipient) ?? {} : {})", "...{}", "test/m4/units.test.mjs"],
+  ["diagnostics hand out every body", "src/daemon.mjs", "const open = method === \"peer_inbox\" || settings[LEGACY_BODIES].value;", "const open = true;", "test/m4/review-fixes.test.mjs"],
+  ["any process gets the reply body", "src/daemon.mjs", "return Boolean(asked) && asked.requesterPid === caller.pid", "return Boolean(asked) || asked.requesterPid === caller.pid", "test/m4/review-fixes.test.mjs"],
+  ["requester not recorded", "src/daemon.mjs", "await recordRequester(sent?.messageId ?? args.messageId, caller); ", "", "test/m4/review-fixes.test.mjs"],
+  ["compatibility window on by default", "src/core/settings.mjs", "value: !invalid && fromFile?.[LEGACY_BODIES] === true,", "value: !invalid && fromFile?.[LEGACY_BODIES] !== false,", "test/m4/review-fixes.test.mjs"],
+  ["failed post leaves its body file", "src/core/posts.mjs", "    if (spooled.bodyFile) await discardSpooled(", "    if (false) await discardSpooled(", "test/m2/posts.test.mjs"],
+  ["orphans deleted, not kept", "src/core/orphans.mjs", "await fsp.rename(file, path.join(target, name));", "await fsp.unlink(file);", "test/m4/review-fixes.test.mjs"],
+  ["referenced bodies swept", "src/core/orphans.mjs", "if (!NAME.test(name) || referenced.has(`${INBOUND_DIRNAME}/${name}`)) continue;", "if (!NAME.test(name)) continue;", "test/m4/review-fixes.test.mjs"]
 ];
 
 const root = process.cwd();
