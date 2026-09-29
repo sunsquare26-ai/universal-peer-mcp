@@ -19,7 +19,10 @@ export function fakeConnect({ root, state = "idle", version = VERSION, threadId 
       calls.push([method, params]);
       if (method === "initialize") return { userAgent: `codex_cli_rs/${version} (Mac OS 27.0.0; arm64)`, codexHome: "/x", platformFamily: "unix", platformOs: "macos" };
       if (method === "thread/loaded/list") return { data: [threadId] };
-      if (method === "thread/read") return { thread: { id: threadId, cwd: root, status: { type: state }, turns: state === "active" ? [{ id: "turn-1", status: "inProgress" }] : [] } };
+      // Like the real server: turns only when asked for them (the adapter must not ask: on a long
+      // live thread that answer is tens of MB), the newest turn through thread/turns/list.
+      if (method === "thread/read") { if (params?.includeTurns) throw Object.assign(new Error("full hydration requested"), { code: "FULL_HYDRATION" }); return { thread: { id: params?.threadId ?? threadId, cwd: root, status: state === "active" ? { type: "active", activeFlags: [] } : { type: state }, turns: [] } }; }
+      if (method === "thread/turns/list") return { data: state === "active" ? [{ id: "turn-1", status: "inProgress" }] : [{ id: "turn-0", status: "completed" }] };
       if (method === "turn/start") return { turn: { id: "turn-2" } };
       if (method === "turn/steer") return { turnId: params.expectedTurnId };
       return {};

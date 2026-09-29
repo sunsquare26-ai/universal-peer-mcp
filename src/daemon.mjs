@@ -445,7 +445,17 @@ async function readInbox(args, caller) {
   if (!who.authenticated) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason}); register first: universal-peer-mcp register --alias <name>`), { code: "SENDER_UNAUTHENTICATED" });
   if (args.recipient !== undefined && args.recipient !== who.alias) { await store.append("peer_inbox_refused", { reason: "not_own_inbox", readerAlias: who.alias, readerPid: caller?.pid }).catch(() => {}); throw Object.assign(new Error(`this session is ${who.alias}; it cannot read another peer's inbox`), { code: "RECIPIENT_MISMATCH" }); }
   // M3: what the inbox returns is peer content for review, never an owner instruction or approval.
-  return withInlineBodies({ provenance: "peer_content_not_owner_instruction", alias: who.alias, events: inbox(store.events, who.alias, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0, lineage: lineageOf(who) }) }, caller, "peer_inbox");
+  const events = inbox(store.events, who.alias, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0, lineage: lineageOf(who) });
+  // `--message-id <id>` (the id a doorbell named): say plainly what became of it, so a late doorbell
+  // for a message already handled is skipped without guessing. Only for this reader's own mail.
+  let lookup = null;
+  if (typeof args.messageId === "string") {
+    const id = args.messageId.toLowerCase();
+    const post = store.events.find((e) => e.type === "peer_post" && e.messageId === id && e.recipient === who.alias);
+    const done = post ? store.events.find((e) => e.type === "peer_post_processed" && e.messageId === id) : null;
+    lookup = { messageId: id, state: !post ? "not_found" : done ? "already_processed" : events.some((e) => e.messageId === id) ? "pending" : "held_for_owner", ...(done ? { processedSeq: done.seq } : {}) };
+  }
+  return withInlineBodies({ provenance: "peer_content_not_owner_instruction", alias: who.alias, ...(lookup ? { lookup } : {}), events: lookup ? events.filter((e) => e.messageId === lookup.messageId) : events }, caller, "peer_inbox");
 }
 async function ackOwnInbox(args, caller) {
   const who = await identifyCaller(caller);

@@ -116,3 +116,35 @@ test("Codex post -> Claude doorbell (fixed line on the session socket) -> Claude
   expect(cbox.json.events.map((e) => e.messageId)).toEqual([replyId]);
   expect((await x.run(["inbox-ack", "--message-id", replyId])).json).toMatchObject({ processed: true });
 });
+
+test("running turn on a long thread: the product path steers (metadata read + newest turn), never a full-history read", async () => {
+  const L = await lane(); lanes.push(L);
+  const x = await L.codex(); const s = await stub(L, x.threadId, "active"); await configure(L, s.sock);
+  const a = await L.claude();
+  await a.run(["register", "--alias", "test-claude-1"]); await x.run(["register", "--alias", "test-codex-1"]);
+  const id = (await a.run(["post", "--to", "test-codex-1", "--body-file", await writeBody(L, "mid-turn")])).json.results[0].messageId;
+  expect(await waitRow(L, (r) => r.type === "doorbell_outcome" && r.messageId === id)).toMatchObject({ state: "sent", mode: "steered", turnId: "turn-running" });
+  expect(await s.turns()).toEqual([{ method: "turn/steer", threadId: x.threadId, text: `PEER_DOORBELL v=1 message_id=${id}`, expectedTurnId: "turn-running" }]);
+});
+
+test("a queued doorbell that arrives after the message was acked: recorded as doorbell_stale once; inbox --message-id says already_processed", async () => {
+  const L = await lane(); lanes.push(L);
+  const x = await L.codex(); const a = await L.claude();
+  // No app-server socket: the doorbell can only go through the CLI queue (held).
+  const cli = await writeCli(L.base, { version: "0.159.0" });
+  await fs.writeFile(path.join(L.root, "config.json"), JSON.stringify({ codexCli: cli, codexAppServerSocket: path.join(L.base, "missing.sock"), codexVersion: "0.159.0" }), { mode: 0o600 });
+  await a.run(["register", "--alias", "test-claude-1"]); await x.run(["register", "--alias", "test-codex-1"]);
+  const id = (await a.run(["post", "--to", "test-codex-1", "--body-file", await writeBody(L, "queued")])).json.results[0].messageId;
+  expect(await waitRow(L, (r) => r.type === "doorbell_outcome" && r.messageId === id)).toMatchObject({ state: "held", via: "queue" });
+  expect((await x.run(["inbox", "--message-id", id])).json.lookup).toEqual({ messageId: id, state: "pending" });
+  await x.run(["inbox-ack", "--message-id", id]);
+  expect(await waitRow(L, (r) => r.type === "doorbell_stale" && r.messageId === id)).toMatchObject({ via: "queue" });
+  // The late doorbell is then read by the receiver: explicit, empty of events, no second processing.
+  const late = await x.run(["inbox", "--message-id", id]);
+  expect(late.json.lookup).toMatchObject({ messageId: id, state: "already_processed" });
+  expect(late.json.events).toEqual([]);
+  expect((await x.run(["inbox-ack", "--message-id", id])).json).toMatchObject({ already: true });
+  expect((await L.events()).filter((r) => r.type === "doorbell_stale")).toHaveLength(1);
+  // Another session cannot probe someone else's ids.
+  expect((await a.run(["inbox", "--message-id", id])).json.lookup).toEqual({ messageId: id, state: "not_found" });
+});

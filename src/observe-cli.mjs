@@ -72,7 +72,7 @@ export async function observeCommand(command, args) {
     const { controlCall } = await import("./core/control.mjs");
     return controlCall("peer_post", { ...(to.length ? { to } : {}), body, ...(replyTo ? { replyTo } : {}), ...(option(args, "--group-id") ? { groupId: option(args, "--group-id") } : {}) });
   }
-  if (command === "inbox") { const { controlCall } = await import("./core/control.mjs"); const recipient = option(args, "--recipient"); return controlCall("peer_inbox", recipient ? { recipient } : {}); }
+  if (command === "inbox") { const { controlCall } = await import("./core/control.mjs"); const recipient = option(args, "--recipient"); const messageId = option(args, "--message-id"); return controlCall("peer_inbox", { ...(recipient ? { recipient } : {}), ...(messageId ? { messageId } : {}) }); }
   // M4 onboarding. `register` is run by the session being registered (its own shell), which is what
   // proves it; the alias is the only thing it says about itself.
   if (command === "register") {

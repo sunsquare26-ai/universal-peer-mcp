@@ -52,7 +52,7 @@ const MUTANTS = [
   // M3
   ["queue takes a body", "src/extensions/codex-queue/index.mjs", "  if (!match) throw fail(\"INVALID_QUEUE_CALL\");\n  const argv = queueArgv(target.threadId, match[1]);", "  const argv = [\"queue\", \"--thread\", target.threadId, \"--message\", text];", "test/m0/doorbell-contract.test.mjs"],
   ["version mismatch ignored", "src/extensions/codex-queue/index.mjs", "if ((await this.cliVersion(target.cliPath)) !== serverVersion) throw fail(\"VERSION_MISMATCH\");", "", "test/m3/codex-wake.test.mjs"],
-  ["running turn gets a new turn", "src/extensions/codex-queue/index.mjs", "params.expectedTurnId = active[0].id; method = \"turn/steer\";", "method = \"turn/start\";", "test/m3/codex-wake.test.mjs"],
+  ["running turn gets a new turn", "src/extensions/codex-queue/index.mjs", "params.expectedTurnId = activeTurnId; method = \"turn/steer\";", "method = \"turn/start\";", "test/m3/codex-wake.test.mjs"],
   ["held reported as queued", "src/extensions/codex-queue/index.mjs", "mode: state === \"active\" ? \"held_behind_running_turn\" : \"queued\"", "mode: \"queued\"", "test/m0/held-queue.test.mjs"],
   ["target keys unchecked", "src/extensions/codex-queue/index.mjs", "    if (Object.keys(entry).some((key) => !TARGET_KEYS.has(key))) throw fail(\"TARGET_UNAVAILABLE\");\n", "", "test/m0/doorbell-contract.test.mjs"],
   // M3 product wiring
@@ -67,6 +67,10 @@ const MUTANTS = [
   ["Claude doorbell id not derived", "src/core/doorbell-service.mjs", "messageId: uuidv5(`doorbell:${post.messageId}`)", "messageId: crypto.randomUUID()", "test/m3/doorbell-service.test.mjs"],
   ["Claude doorbell ignores a moved alias", "src/core/doorbell-service.mjs", "if (!current || !sameUuid(current, bound)) return \"WAKE_TARGET_MISMATCH\";", "", "test/m3/doorbell-service.test.mjs"],
   ["no doorbell for Claude", "src/core/doorbell-service.mjs", "      if (post.recipientKind === \"claude\") return this.#ringClaude(post);\n", "", "test/m3/doorbell-e2e.test.mjs"],
+  ["full-history thread read", "src/extensions/codex-queue/index.mjs", "const { thread } = await rpc.call(\"thread/read\", { threadId: target.threadId });", "const { thread } = await rpc.call(\"thread/read\", { threadId: target.threadId, includeTurns: true });", "test/m3/doorbell-e2e.test.mjs"],
+  ["running turn id not looked up", "src/extensions/codex-queue/index.mjs", "if (newest?.status === \"inProgress\" && typeof newest.id === \"string\" && newest.id) activeTurnId = newest.id;", "void newest;", "test/m3/doorbell-e2e.test.mjs"],
+  ["late queued doorbell not marked stale", "src/core/doorbell-service.mjs", "if (out?.state === \"held\" && !this.store.events.some", "if (false && !this.store.events.some", "test/m3/doorbell-e2e.test.mjs"],
+  ["inbox hides already_processed", "src/daemon.mjs", ": done ? \"already_processed\" :", ": done ? \"pending\" :", "test/m3/doorbell-e2e.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
   ,
   // M4

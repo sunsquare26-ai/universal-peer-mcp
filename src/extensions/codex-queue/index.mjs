@@ -135,11 +135,22 @@ export class CodexWake {
         cursor = result.nextCursor; if (!cursor) break;
       }
       if (!loaded) throw fail("TARGET_UNAVAILABLE");
-      const { thread } = await rpc.call("thread/read", { threadId: target.threadId, includeTurns: true });
+      // Metadata only. `includeTurns: true` hydrates the whole rollout: 38,490,010 bytes for the live
+      // codex-main thread (386 turns, measured 2026-09-29 23:3x KST), past the transport's 8 MiB frame
+      // bound, so the socket closed ("Max payload size exceeded") and every running-turn doorbell fell
+      // back to the queue as held. The protocol marks full hydration deprecated for paginated threads.
+      const { thread } = await rpc.call("thread/read", { threadId: target.threadId });
       if (thread.id !== target.threadId || (target.cwd !== undefined && await fsp.realpath(thread.cwd) !== await fsp.realpath(target.cwd))) throw fail("TARGET_UNAVAILABLE");
       const state = thread.status?.type;
       if (!["idle", "active"].includes(state)) throw fail("TARGET_UNAVAILABLE");
-      return await action({ rpc, thread, target, state, serverVersion });
+      // The running turn's id, when there is one, from the newest turn only (one small page).
+      let activeTurnId = null;
+      if (state === "active") {
+        const page = await rpc.call("thread/turns/list", { threadId: target.threadId, limit: 1 });
+        const newest = Array.isArray(page?.data) ? page.data[0] : null;
+        if (newest?.status === "inProgress" && typeof newest.id === "string" && newest.id) activeTurnId = newest.id;
+      }
+      return await action({ rpc, thread, target, state, serverVersion, activeTurnId });
     } finally { rpc.close(); }
   }
   async status({ codexAlias }) {
@@ -176,7 +187,7 @@ export class CodexWake {
     const bell = doorbell(messageId);
     let attempted = false;
     try {
-      const result = await this.inspect(codexAlias, async ({ rpc, thread, target, state, serverVersion }) => {
+      const result = await this.inspect(codexAlias, async ({ rpc, thread, target, state, serverVersion, activeTurnId }) => {
         if (target.transport === "cli-queue") {
           attempted = true;
           await this.enqueue(target, bell);
@@ -185,9 +196,8 @@ export class CodexWake {
         const params = { threadId: target.threadId, clientUserMessageId: messageId, input: [{ type: "text", text: bell, text_elements: [] }] };
         let method = "turn/start";
         if (state === "active") {
-          const active = thread.turns?.filter((turn) => turn.status === "inProgress");
-          if (active?.length !== 1) throw fail("TARGET_UNAVAILABLE");
-          params.expectedTurnId = active[0].id; method = "turn/steer";
+          if (!activeTurnId) throw fail("TARGET_UNAVAILABLE");
+          params.expectedTurnId = activeTurnId; method = "turn/steer";
         }
         attempted = true;
         const response = await rpc.call(method, params);

@@ -61,6 +61,14 @@ export class DoorbellService {
 
   // Called for every appended row; acts on accepted posts for Codex peers.
   async onAppend(row) {
+    // A queued doorbell cannot be withdrawn. When the message is processed before the queue
+    // delivers it, the late doorbell is recorded as stale (once) — the receiver sees
+    // already_processed on `inbox --message-id` and skips it. Nothing is sent or cancelled.
+    if (row?.type === "peer_post_processed") {
+      const out = this.outcome(row.messageId);
+      if (out?.state === "held" && !this.store.events.some((e) => e.type === "doorbell_stale" && sameUuid(e.messageId, row.messageId))) await this.store.append("doorbell_stale", { messageId: row.messageId, recipient: out.recipient, via: out.via ?? null, outcomeSeq: out.seq });
+      return;
+    }
     if (row?.type !== "peer_post" || !["codex", "claude"].includes(row.recipientKind)) return;
     await this.ring(row.messageId, { first: true });
   }
