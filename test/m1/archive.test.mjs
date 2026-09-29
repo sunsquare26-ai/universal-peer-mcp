@@ -76,7 +76,7 @@ test("backup over SSH is one rsync with a fixed argv that never replaces a file"
   const result = await backupArchives({ directory: dir, destination: "hyungseoklee@air:/Users/hyungseoklee/peer-archive", exec: async (...a) => { calls.push(a); return { stdout: "" }; } });
   expect(result).toMatchObject({ remote: true, copied: 4 });
   expect(calls[0][0]).toBe("/usr/bin/ssh");
-  expect(calls[0][1]).toEqual(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes", "hyungseoklee@air", "mkdir -p -m 700 -- /Users/hyungseoklee/peer-archive && chmod 700 -- /Users/hyungseoklee/peer-archive"]);
+  expect(calls[0][1]).toEqual(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes", "hyungseoklee@air", "mkdir -p -m 700 -- /Users/hyungseoklee/peer-archive && chmod 700 /Users/hyungseoklee/peer-archive"]);
   const [cmd, argv, opts] = calls[1];
   expect(cmd).toBe("/usr/bin/rsync");
   expect(argv.slice(0, 4)).toEqual(["-a", "--ignore-existing", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes"]);

@@ -33,7 +33,8 @@ export async function backupArchives({ directory, destination, exec = run }) {
     try {
       // macOS ships openrsync, which has no --chmod: the files keep their 0600 through -a, and the
       // directory is made 0700 here first (mkdir -p also creates missing parents, which rsync won't).
-      await exec("/usr/bin/ssh", [...SSH, host, `mkdir -p -m 700 -- ${remotePath} && chmod 700 -- ${remotePath}`], { timeout: 30_000 });
+      // macOS chmod refuses a `--` argument (measured 2026-09-29); the path is validated to start with /.
+      await exec("/usr/bin/ssh", [...SSH, host, `mkdir -p -m 700 -- ${remotePath} && chmod 700 ${remotePath}`], { timeout: 30_000 });
       await exec("/usr/bin/rsync", ["-a", "--ignore-existing", "-e", `ssh ${SSH.join(" ")}`, ...files.map((f) => path.join(directory, f)), destination.endsWith("/") ? destination : `${destination}/`], { timeout: 120_000 });
       return { configured: true, remote: true, copied: files.length, invalid };
     } catch (error) {
