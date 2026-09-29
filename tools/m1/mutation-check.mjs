@@ -94,7 +94,7 @@ const MUTANTS = [
   ["codex caller never proven", "src/daemon.mjs", "  const codex = resolveCodex(caller?.pid);\n", "  const codex = { proven: false, reason: \"no_codex_thread\" };\n", "test/m4/registration.test.mjs"]
   ,
   // M4 review fixes
-  ["new holder reads the old session's mail", "src/daemon.mjs", ", lineage: lineageOf(who) }) }, caller, \"peer_inbox\");", ", lineage: null }) }, caller, \"peer_inbox\");", "test/m4/review-fixes.test.mjs"],
+  ["new holder reads the old session's mail", "src/daemon.mjs", "afterSeq : 0, lineage: lineageOf(who) });", "afterSeq : 0, lineage: null });", "test/m4/review-fixes.test.mjs"],
   ["new holder acks the old session's mail", "src/daemon.mjs", "if (row && inbox(store.events, who.alias, { lineage: lineageOf(who) })", "if (false && row && inbox(store.events, who.alias, { lineage: lineageOf(who) })", "test/m4/review-fixes.test.mjs"],
   ["resume does not inherit", "src/core/posts.mjs", "{ lineage.add(`claude:${from}`); grew = true; }", "{ grew = false; }", "test/m4/review-fixes.test.mjs"],
   ["frame post unbound", "src/core/peer-core.mjs", "...(recipient !== \"*\" ? this.postRecipientFields?.(recipient) ?? {} : {})", "...{}", "test/m4/units.test.mjs"],
