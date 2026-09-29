@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
-import { MAX_EVENT_BYTES } from "./limits.mjs";
+import { MAX_EVENT_BYTES, referenceMatches, sameUuid } from "./limits.mjs";
 import { assertPrivateFile, ensurePrivateDirectory } from "./state-paths.mjs";
 
 export class EventStore {
@@ -57,7 +57,7 @@ export class EventStore {
   reserveRecovery(data) {
     const operation = this.chain.then(async () => {
       if (this.poisoned) throw this.poisoned;
-      const prior = this.events.find((event) => event.type === "send_recovery_reserved" && event.messageId === data.messageId);
+      const prior = this.events.find((event) => event.type === "send_recovery_reserved" && sameUuid(event.messageId, data.messageId));
       if (prior) return { created: false, event: prior };
       return { created: true, event: await this.#write("send_recovery_reserved", data) };
     });
@@ -67,19 +67,41 @@ export class EventStore {
 
   list({ afterSeq = 0, messageId = null } = {}) {
     if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new Error("afterSeq must be a non-negative integer");
-    return this.events.filter((event) => event.seq > afterSeq && (!messageId || event.messageId === messageId));
+    if (messageId) this.request(messageId); // refuse ambiguous historical case collisions on waits/replays too
+    return this.events.filter((event) => event.seq > afterSeq && (!messageId || sameUuid(event.messageId, messageId)));
   }
 
-  request(messageId) { return this.events.find((event) => event.type === "send_requested" && event.messageId === messageId) ?? null; }
+  request(messageId) {
+    const matches = this.events.filter((event) => event.type === "send_requested" && sameUuid(event.messageId, messageId));
+    // Older builds could reserve both spellings. Never silently choose one target/hash.
+    if (matches.length > 1) throw Object.assign(new Error("ambiguous historical messageId"), { code: "MESSAGE_ID_CONFLICT" });
+    return matches[0] ?? null;
+  }
+  // A reference is the leading hex of an id, which is what a sender that has no field to put a
+  // full one in writes (src/adapters/claude-native-v1/protocol.mjs). This narrows this ledger's
+  // own rows and never names a row that is not there. A reference matching more than one request
+  // is refused rather than resolved: choosing one of them would bind an answer to a message
+  // nobody chose, and the caller reports the ambiguity instead. `request` is unchanged and is
+  // still the only way an exact id is looked up.
+  requestByReference(reference) {
+    const matches = new Map();
+    for (const event of this.events) {
+      if (event.type !== "send_requested" || typeof event.messageId !== "string") continue;
+      if (!referenceMatches(event.messageId, reference)) continue;
+      matches.set(event.messageId.toLowerCase(), event);
+    }
+    if (matches.size > 1) return { request: null, ambiguous: true };
+    return { request: [...matches.values()][0] ?? null, ambiguous: false };
+  }
   requestByTransport(transportMessageId) {
-    const recovery = this.events.find((event) => event.type === "send_recovery_reserved" && event.transportMessageId === transportMessageId);
+    const recovery = this.events.find((event) => event.type === "send_recovery_reserved" && sameUuid(event.transportMessageId, transportMessageId));
     return recovery ? this.request(recovery.messageId) : this.request(transportMessageId);
   }
   requestBySubscription(subscriptionId) {
-    const recovery = this.events.find((event) => event.type === "send_recovery_reserved" && event.subscriptionId === subscriptionId);
+    const recovery = this.events.find((event) => event.type === "send_recovery_reserved" && sameUuid(event.subscriptionId, subscriptionId));
     if (recovery) return this.request(recovery.messageId);
-    const initial = this.events.find((event) => event.type === "send_requested" && event.subscriptionId === subscriptionId);
-    return initial ?? null;
+    const initial = this.events.find((event) => event.type === "send_requested" && sameUuid(event.subscriptionId, subscriptionId));
+    return initial ? this.request(initial.messageId) : null;
   }
   async close() { await this.chain; }
 

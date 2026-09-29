@@ -42,7 +42,7 @@ const HASH_A = "0f".repeat(32);
 const SOCKET = "/tmp/fake-public-contract.sock";
 
 async function wired() {
-  const made = await fsp.mkdtemp(path.join(os.tmpdir(), "peer-public-contract-")); roots.push(made); await fsp.chmod(made, 0o700);
+  const made = await fsp.mkdtemp(path.join("/private/tmp", "peer-public-contract-")); roots.push(made); await fsp.chmod(made, 0o700);
   const root = await fsp.realpath(made);
   const store = new EventStore(statePaths(root)); await store.init();
   const target = { sessionId: fx(900), cwd: root, permissionMode: "prompting", expectedDisplayName: null };
@@ -118,13 +118,13 @@ describe("(b) a code review receipt records a transport id or none", () => {
 
 describe("(c) a refusal names the frame it refused", () => {
   test("an oversize first frame is refused under ordinal 1, not 0", async () => {
-    const made = await fsp.mkdtemp(path.join(os.tmpdir(), "peer-oversize-")); roots.push(made); await fsp.chmod(made, 0o700);
+    const made = await fsp.mkdtemp(path.join("/private/tmp", "peer-oversize-")); roots.push(made); await fsp.chmod(made, 0o700);
     const root = await fsp.realpath(made);
     const sessionsDir = path.join(root, "sessions"); const socketDir = path.join(root, "sockets");
     await fsp.mkdir(sessionsDir, { mode: 0o700 }); await fsp.mkdir(socketDir, { mode: 0o700 });
     const refusals = [];
     const receiver = await startReceiver(() => {}, {
-      sessionsDir, socketDir,
+      stateRoot: root, sessionsDir, socketDir,
       peerIdentityReader: () => ({ pid: process.pid, uid: process.getuid(), procStart: processStart() }),
       onFrameRefused: async (refusal) => { refusals.push(refusal); }
     });

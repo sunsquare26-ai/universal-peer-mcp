@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -19,6 +20,16 @@ export const LEGACY_STATE_DIR_WARNING = `${LEGACY_STATE_DIR_ENV} is the old name
 // exactly like a fresh install — the same silent miss the variable above is read to prevent, with
 // no second name to catch it. Renaming it is a separate change with a migration attached.
 const DEFAULT_ROOT = path.join(os.homedir(), "Library", "Application Support", "claude-peer-mcp");
+
+// Inbound bodies live in their own directory under the state root, and the name is exported so
+// that what a ledger row records and what the spool writes cannot drift apart
+// (src/core/inbound-spool.mjs). A row names `inbound/<file>` and not an absolute path, because
+// the public projection redacts absolute paths (src/mcp/redact.mjs).
+export const INBOUND_DIRNAME = "inbound";
+
+// Named here with the other state file names, and defined here rather than imported, because
+// `src/core/rebind-sidecar.mjs` imports this module for its private-file helpers.
+export const REBIND_STATE_FILENAME = "targets-rebind.json";
 
 // An empty value is an unset value, not an override: `??` would resolve "" to the process
 // working directory and put state, and a 0700 chmod, inside whatever folder the caller is in.
@@ -63,7 +74,11 @@ export function statePaths(root = stateRootFromEnvironment()) {
     controlToken: path.join(absolute, "control.token"),
     daemon: path.join(absolute, "daemon.json"),
     daemonLock: path.join(absolute, "daemon.lock"),
-    targets: path.join(absolute, "targets.json")
+    targets: path.join(absolute, "targets.json"),
+    // What succession remembers, deliberately not inside the table above
+    // (src/core/rebind-sidecar.mjs).
+    rebindState: path.join(absolute, REBIND_STATE_FILENAME),
+    inbound: path.join(absolute, INBOUND_DIRNAME)
   };
 }
 
@@ -86,10 +101,23 @@ export async function assertPrivateFile(file, { maxBytes = 1024 * 1024 } = {}) {
   return stat;
 }
 
-export async function atomicPrivateWrite(file, content) {
-  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+// `mode` exists for one caller: the target table, which this package rewrites but did not create.
+// An operator's `targets.json` can be 0600 or 0400 and a rewrite that silently made it 0600 either
+// way would be this package changing a permission nobody asked it to change. The temporary file is
+// still created 0600 whatever the final mode is, so the window before the rename is never wider
+// than the window after it; the requested mode is applied to the handle, not to the name, so it
+// cannot land on a file this call did not create.
+let temporaries = 0;
+export async function atomicPrivateWrite(file, content, { mode = 0o600 } = {}) {
+  // The name has to be unique among every temporary this process makes, and a pid and a clock are
+  // not. Two successions that landed in the same millisecond collided on this name and `O_EXCL`
+  // refused the second one with EEXIST — reproduced 3 times in 3 attempts — which arrived at the
+  // caller as an unrecognised failure and was read back as "no live session", the opposite of what
+  // had just been proven. A counter makes two writes from this process distinct whatever the clock
+  // says, and the random suffix makes two processes distinct without asking either of them.
+  const temp = `${file}.${process.pid}.${Date.now()}.${(temporaries += 1).toString(36)}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   const handle = await fsp.open(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(content); await handle.sync(); } finally { await handle.close(); }
+  try { await handle.writeFile(content); await handle.sync(); if (mode !== 0o600) await handle.chmod(mode); } finally { await handle.close(); }
   await fsp.rename(temp, file);
   const directory = await fsp.open(path.dirname(file), fs.constants.O_RDONLY);
   try { await directory.sync(); } finally { await directory.close(); }

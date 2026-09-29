@@ -86,6 +86,20 @@ export function processIdentity(pid = process.pid) {
   return { uid: renderedUid(match[1]), procStart: renderedProcStart(match[2]) };
 }
 
+// The pid that executed this one, read through the same pinned `ps` the two readers above use.
+// It exists for one caller: the succession proof, which has to look past the process a registry row
+// names to the one that launched it, because `claude --resume <id>` is on the launcher's command
+// line and the resumed session inherits none of it (src/core/session-rebind.mjs). It reads a number
+// and nothing else — a ppid is not an identity and nothing is decided on it here; what the proof
+// does with the pid is read its arguments, under the same rules as any other pid.
+export function processParent(pid = process.pid) {
+  assertPid(pid);
+  const text = execFileSync(PS, ["-ww", "-p", String(pid), "-o", "ppid="], psOptions());
+  const rendered = typeof text === "string" ? text.trim() : "";
+  if (!UID.test(rendered)) throw new Error("process parent unavailable");
+  return Number(rendered);
+}
+
 export function readProcessArgv(pid) {
   assertPid(pid);
   const argmax = readKernelInt([CTL_KERN, KERN_ARGMAX]);

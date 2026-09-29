@@ -35,7 +35,7 @@ const cleanups = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
 
 async function harness({ targetPid = process.pid, ...options } = {}) {
-  const made = await fsp.mkdtemp(path.join(os.tmpdir(), "peer-obs-"));
+  const made = await fsp.mkdtemp(path.join("/private/tmp", "peer-obs-"));
   cleanups.push(() => fsp.rm(made, { recursive: true, force: true }));
   const root = await fsp.realpath(made); await fsp.chmod(root, 0o700);
   const sessionsDir = path.join(root, "sessions"); const socketDir = path.join(root, "sockets");
@@ -53,7 +53,7 @@ async function harness({ targetPid = process.pid, ...options } = {}) {
       core: { acceptFrame: (frame, peer) => core.acceptFrame(frame, peer) },
       observers: [(frame, peer) => milestone.observeFrame(frame, peer), (frame, peer) => review.observeFrame(frame, peer)]
     }),
-    { sessionsDir, socketDir, onFrameRefused: async (refusal) => { refusals.push(refusal); await store.append("peer_frame_refused", refusal); }, ...options }
+    { stateRoot: root, sessionsDir, socketDir, onFrameRefused: async (refusal) => { refusals.push(refusal); await store.append("peer_frame_refused", refusal); }, ...options }
   );
   cleanups.push(() => started.close());
   const socketPath = started.address.slice("uds:".length);
@@ -177,7 +177,7 @@ test("a frame an enabled extension took is not on the uncorrelated list", async 
 // as a uuid by an older receiver, a reason carrying a socket path — cannot fail a caller's
 // query, because it is never in the answer. The residual is written down in
 // docs/known-issues.md: a caller reads these by reading the ledger, not over MCP.
-test("the diagnostics stay on the ledger and reach neither public projection", async () => {
+test("reason is safely published while historical connection metadata cannot break a query", async () => {
   const harnessed = await harness();
   await harnessed.write([status(crypto.randomUUID())]);
   await harnessed.store.append("peer_frame_refused", { connectionId: crypto.randomUUID(), frameOrdinal: 0, reason: `${harnessed.socketPath} rejected by ${os.homedir()}` });
@@ -197,15 +197,15 @@ test("the diagnostics stay on the ledger and reach neither public projection", a
     const published = response.result.structuredContent.events.filter((entry) => ["peer_frame_uncorrelated", "peer_frame_refused"].includes(entry.type));
     expect(published.map((entry) => entry.type)).toEqual(["peer_frame_uncorrelated", "peer_frame_refused"]);
     for (const entry of published) {
-      expect(Object.keys(entry).sort()).toEqual(["at", "seq", "type"]);
-      for (const key of ["reason", "connectionId", "frameOrdinal"]) expect(key in entry).toBe(false);
+      expect(Object.keys(entry).sort()).toEqual(["at", "reason", "seq", "type"]);
+      for (const key of ["connectionId", "frameOrdinal"]) expect(key in entry).toBe(false);
     }
     const bytes = JSON.stringify(response);
     expect(bytes).not.toContain(harnessed.socketPath);
     expect(bytes).not.toContain(os.homedir());
     expect(bytes).not.toContain(harnessed.token);
     expect(bytes).not.toContain(".sock");
-    expect(bytes).not.toContain("unknown_message_status");
+    expect(bytes).toContain("unknown_message_status");
   }
 
   // and the ledger kept every one of them

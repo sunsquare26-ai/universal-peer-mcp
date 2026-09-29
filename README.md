@@ -11,7 +11,7 @@ Read these four before installing. They are properties of the design, not settin
 1. **Same Mac, same user account.** Access is gated by a same-uid check and a `0600` control token. Any other program running as the same uid can use this server.
 2. **Admin mode is decided when the daemon starts.** It comes from the daemon's own startup environment (`CLAUDE_PEER_MCP_ADMIN=1`). No later request, tool argument, or config file can turn it on.
 3. **`SIGTERM` cleans up.** On `SIGTERM` or `SIGINT` the daemon removes its socket, identity file, lock, and control token before exiting.
-4. **Changing target config requires restarting the daemon.** Targets are read once at startup and are not reloaded while the daemon runs.
+4. **Changing target config requires an explicit verified update and daemon restart.** Targets remain pinned to the selected session. Keep the existing state and pending messages; see [the upgrade procedure](docs/INSTALL-SIDE-BY-SIDE.md).
 
 ## What it is not
 
@@ -309,12 +309,19 @@ Apache-2.0. See [LICENSE](LICENSE). Copyright 이형석 (Hyungseok Lee).
 
 Anthropic, Claude, OpenAI, and Codex are trademarks of their respective owners. This project is not an official Anthropic or OpenAI project and is not affiliated with, endorsed by, or sponsored by either company.
 
-### Waking Codex
 
-An opt-in existing-thread adapter is available with `serve --enable codex-wake`.
-It requires the receiving host to expose an app-server socket; it cannot wake
-a stdio-only ChatGPT app process. See [configuration and verified limits](docs/codex-wake.md).
+## 0.1.1 repair candidate
 
-Automatic verified reply/completion notifications are available separately with
-`serve --enable codex-wake-bridge` and an explicit peer-to-Codex routing file.
-They remain off by default; the same existing-host listener requirement applies.
+`daemon_status` reports server/daemon build IDs plus startup/current disk-source digests. A
+running process is not upgraded by replacing its files. Install the same pinned tarball in both
+prefixes, retain the existing state root, and verify the replacement processes and a real reply.
+
+`peer_wait` timing out means only that the requested application response was not observed
+within that call. Continue waiting with the same message ID; do not repeat the send.
+`peer_list_events` is paginated by count and UTF-8 size. While `hasMore` is true, continue with
+`afterSeq: cursor` and the same `messageId` filter. One page is not the whole history.
+
+In-band replies accept a first-line `|` body separator. A supplied verdict must be `pass` or
+`fail`; missing verdict is allowed, duplicate/malformed verdict refuses correlation. The body
+is still spooled when no marker correlates. `bodyStorageOmitted: write_failed` explicitly marks
+storage failure; a correlated frame from the wrong process is refused before body storage.

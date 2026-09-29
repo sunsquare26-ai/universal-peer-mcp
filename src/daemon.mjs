@@ -1,20 +1,27 @@
 #!/usr/bin/env bun
-import { CodexWakeBridge, loadBridgeConfig } from "./extensions/codex-wake/bridge.mjs";
+import { shutdownResources } from "./core/shutdown.mjs";
 import crypto from "node:crypto";
+import { targetDiagnostic } from "./core/target-diagnostics.mjs";
+import { observeBuild } from "./core/build-identity.mjs";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import net from "node:net";
 import { EventStore } from "./core/events.mjs";
+import { hydrateInboundBodies } from "./core/inbound-hydrate.mjs";
+import { InboundSpool } from "./core/inbound-spool.mjs";
 import { frameObserver, PeerCore } from "./core/peer-core.mjs";
-import { loadTargets, targetTableDigest } from "./core/target-config.mjs";
+import { TargetTableWatch } from "./core/target-table.mjs";
+import { createSessionRebinder } from "./core/session-rebind.mjs";
 import { atomicPrivateWrite, ensurePrivateDirectory, statePaths } from "./core/state-paths.mjs";
 import { localPeerPid } from "./adapters/claude-native-v1/darwin-peerpid.mjs";
 import { normalizeProcStart, processStart, processUid } from "./adapters/claude-native-v1/darwin-procargs.mjs";
-import { startReceiver } from "./adapters/claude-native-v1/receiver.mjs";
+import { resolveSuccessor } from "./adapters/claude-native-v1/registry.mjs";
+import { startReceiver, receiverOptionsForState } from "./adapters/claude-native-v1/receiver.mjs";
 import { directSend } from "./adapters/claude-native-v1/transport.mjs";
 import { MilestoneExtension } from "./extensions/milestone/index.mjs";
 import { CodeReviewExtension, publicLedgerEvent } from "./extensions/code-review/index.mjs";
 
+const buildObservation = observeBuild();
 const paths = statePaths(); const admin = process.env.CLAUDE_PEER_MCP_ADMIN === "1";
 const enabledExtensions = parseExtensions(process.env.CLAUDE_PEER_MCP_EXTENSIONS);
 // Read once, before anything can connect, so that the answer to "which daemon is this" exists
@@ -41,43 +48,61 @@ await daemonLock.writeFile(`${JSON.stringify({ pid: process.pid, procStart: self
 // invalid already ends this process before it can serve anything, and a missing cwd now ends it
 // with them, naming the directory. That leaves a `daemon.lock` behind for a pid that is gone,
 // which `reclaimDeadDaemon` clears on the next start.
-let targets = {};
-try { targets = await loadTargets(paths.targets); }
-catch (error) { if (error.code !== "ENOENT" || error.path !== paths.targets) throw error; }
-// The one reading this daemon will ever have, reduced once. It is answered with `daemon_status`
-// so the process that reads the file per request can tell whether the table it checked a call
-// against is the table this process would send that call with.
-const targetsDigest = targetTableDigest(targets);
+//
+// The absence is now decided by looking at the table file itself rather than by reading a code off
+// an exception (src/core/target-table.mjs), which is the same rule stated more directly: a cwd that
+// is gone throws here, naming the directory, exactly as every other invalid table does.
+const tableWatch = new TargetTableWatch({ file: paths.targets });
+const startupTable = await tableWatch.read();
+if (startupTable.unreadable) throw startupTable.unreadable;
+let targets = startupTable.table;
+// Not the one reading this daemon will ever have — the reading it has now. It is answered with
+// `daemon_status` and enforced by `assertChecked`, and it is refreshed from disk before every
+// request, so a table an operator repaired is in force on the next call instead of on the next
+// restart. What the check means is unchanged: a command still executes only against the table its
+// caller checked it against.
+let targetsDigest = startupTable.digest;
 const store = new EventStore(paths); await store.init();
-let core; let milestone = null; let codeReview = null; let codexBridge = null;
-if (enabledExtensions.includes("codex-wake-bridge")) {
-  const config = await loadBridgeConfig(paths.root);
-  if (config.routes.some(route => !Object.hasOwn(targets, route.peerAlias))) throw new Error("codex bridge peer alias is not allowlisted");
-  codexBridge = new CodexWakeBridge({ root: paths.root, store, config });
-  await codexBridge.init();
-}
-
+// The shipped daemon installs no `onCorrelatedReply` and still does not — that hook is for a
+// process that embeds PeerCore, and it only ever sees the correlated half of the traffic. The
+// spool is first-party, loads nothing, and keeps the body of every inbound frame whether or not
+// it correlated (docs/inband-reply-header.md).
+const inboundSpool = new InboundSpool(paths);
+let core; let milestone = null; let codeReview = null;
 // core and the enabled extensions are read when a frame arrives, not when this is built, which
 // is the only reason the handler can exist before them.
-const observeFrame = frameObserver({
+const onFrame = frameObserver({
   store,
   core: { acceptFrame: (frame, peer) => core.acceptFrame(frame, peer) },
   observers: [(frame, peer) => milestone?.observeFrame(frame, peer), (frame, peer) => codeReview?.observeFrame(frame, peer)]
 });
-const onFrame = async (...args) => { try { return await observeFrame(...args); } finally { codexBridge?.kick(); } };
 const receiver = Object.keys(targets).length > 0
   ? await startReceiver(
     onFrame,
     // A frame whose writer the kernel could not name with the frame is refused before it gets
     // this far. Both are recorded so that "refused", "arrived and correlated to nothing" and
     // "nothing arrived" are three different answers here rather than one absence.
-    { onFrameRefused: async (refusal) => { await store.append("peer_frame_refused", refusal); } }
+    receiverOptionsForState(paths, { onFrameRefused: async (refusal) => { await store.append("peer_frame_refused", refusal); }, onReclaimSkipped: async (detail) => { await store.append("peer_stale_registry_skipped", detail); } })
   )
   : { address: "uds:/unpublished/universal-peer-mcp.sock", sessionId: null, close: async () => {} };
-core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender });
+// The half of succession that rewrites the operator's table lives out here, with the files and the
+// ledger, and not in the core. Two files, on purpose: the id goes into `targets.json`, which is a
+// field every build already reads, and the switch and the history go into `targets-rebind.json`
+// beside it, which a build that does not know about succession simply does not open
+// (src/core/rebind-sidecar.mjs). The table stays byte-compatible with the build before this one, so
+// this can be installed on one side while the other side is still running, and taken back out
+// without leaving a file the older code refuses. When a send names an alias whose session id nothing live is
+// advertising any more, this looks for a live session holding a kernel-written receipt for that id
+// — `--resume <it>` in its arguments — repoints the alias at the session that answered, and writes
+// down what it did (src/core/session-rebind.mjs). `afterWrite` is what makes the new id take effect
+// in this process on this call rather than on the next restart.
+const rebindTarget = createSessionRebinder({
+  targetsFile: paths.targets, stateFile: paths.rebindState, store, resolveSuccessor,
+  afterWrite: () => refreshTargets()
+});
+core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, rebind: rebindTarget });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
 if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });
-codexBridge?.kick();
 const token = crypto.randomBytes(32).toString("hex"); let closing = false;
 const controlSockets = new Set();
 const server = net.createServer((socket) => accept(socket));
@@ -98,10 +123,14 @@ async function handle(socket, line) {
   try {
     request = JSON.parse(line); const peerPid = localPeerPid(socket);
     if (!safeEqual(request.token, token) || request.clientPid !== peerPid || processUid(peerPid) !== process.getuid() || normalizeProcStart(request.clientProcStart) !== normalizeProcStart(processStart(peerPid))) throw new Error("control authentication failed");
+    // Before the check, not after it: the digest a caller is held against has to be the table this
+    // process would actually send with, and the caller read the file for this request. It is also
+    // before `daemon_status`, which is the answer the caller compares its own reading against.
+    await refreshTargets();
     if (REACHES_A_TARGET.has(request.method)) assertChecked(request.expect);
     const result = await dispatch(request.method, request.args ?? {}); socket.end(`${JSON.stringify({ requestId: request.requestId, ok: true, result })}\n`);
     if (request.method === "daemon_shutdown") setImmediate(shutdown);
-  } catch (error) { socket.end(`${JSON.stringify({ requestId: request?.requestId ?? null, ok: false, error: { code: typeof error?.code === "string" ? error.code : "INTERNAL_FAILURE", message: error?.message ?? "daemon request failed" } })}\n`); }
+  } catch (error) { socket.end(`${JSON.stringify({ requestId: request?.requestId ?? null, ok: false, error: { code: typeof error?.code === "string" ? error.code : "INTERNAL_FAILURE", message: error?.message ?? "daemon request failed", diagnostic: targetDiagnostic(error?.diagnostic) } })}\n`); }
 }
 
 // The methods that can reach a target session: three that name one and one that does not. A
@@ -128,12 +157,28 @@ function assertChecked(expect) {
   throw error;
 }
 
+// One reading of `targets.json`, taken per request and again immediately after a succession rewrote
+// it. A table that could not be parsed leaves the last good one in force and is written down once
+// per distinct bad version: dropping to an empty table would unpublish every alias silently, and
+// serving the old one is safe because the caller's digest will not match it and the call is refused.
+async function refreshTargets() {
+  const reading = await tableWatch.read();
+  if (!reading.changed) return;
+  if (reading.unreadable) { await store.append("target_table_reload_failed", { reason: "target_table_unreadable" }).catch(() => {}); return; }
+  const previousDigest = targetsDigest;
+  targets = reading.table; targetsDigest = reading.digest;
+  if (core) core.targets = targets;
+  if (reading.digestChanged) {
+    await store.append("target_table_reloaded", { previousDigest, targetsDigest, targetCount: Object.keys(targets).length, changedAliases: reading.changedAliases }).catch(() => {});
+  }
+}
+
 async function dispatch(method, args) {
   if (method === "peer_targets") return core.targetsList();
   if (method === "peer_status") return core.status(args.alias);
-  if (method === "peer_send") return core.send(publicSendArgs(args));
-  if (method === "peer_wait") return core.wait(args);
-  if (method === "peer_list_events") { const listing = core.events(args); return { ...listing, events: listing.events.map(publicLedgerEvent) }; }
+  if (method === "peer_send") return withInlineBodies(await core.send(publicSendArgs(args)));
+  if (method === "peer_wait") return withInlineBodies(await core.wait(args));
+  if (method === "peer_list_events") { const listing = core.events(args); return withInlineBodies({ ...listing, events: listing.events.map(publicLedgerEvent) }); }
   if (method === "milestone_status" && milestone) return milestone.status(args);
   if (method === "milestone_list" && milestone) return milestone.list(args);
   if (method === "milestone_wait" && milestone) return milestone.wait(args);
@@ -142,19 +187,33 @@ async function dispatch(method, args) {
   if (method === "code_review_list" && codeReview) return codeReview.list(args);
   if (method === "code_review_wait" && codeReview) return codeReview.wait(args);
   if (method === "code_review_request" && codeReview) return codeReview.request(args);
-  if (method === "daemon_status") return { running: true, pid: process.pid, procStart: identity.procStart, admin, enabledExtensions, eventSeq: store.events.at(-1)?.seq ?? 0, targetCount: Object.keys(targets).length, targetsDigest };
+  if (method === "daemon_status") return { daemonBuild: buildObservation(), running: true, pid: process.pid, procStart: identity.procStart, admin, enabledExtensions, eventSeq: store.events.at(-1)?.seq ?? 0, targetCount: Object.keys(targets).length, targetsDigest };
   if (method === "daemon_shutdown" && admin) return { shuttingDown: true };
   throw new Error("unknown or unavailable daemon method");
 }
 
+// The three answers that carry frame rows, and the one place the body of an inbound frame is put
+// into an answer. `peer_wait` and `peer_list_events` are how the receiving side reads at all, and a
+// `peer_send` replay hands back the same rows for a message already sent. Nothing is written here
+// and nothing the store holds is changed: `hydrateInboundBodies` returns copies, so the ledger keeps
+// a file name and a digest and no body (src/core/inbound-hydrate.mjs).
+//
+// `peer_wait` answers with one row under `event` as well as the listing it came from. It is the same
+// row, so it is replaced with the hydrated copy rather than left as the one row in the answer whose
+// body is missing.
+async function withInlineBodies(result) {
+  if (!result || !Array.isArray(result.events)) return result;
+  const events = await hydrateInboundBodies(result.events, { root: paths.root });
+  if (!result.event || typeof result.event.seq !== "number") return { ...result, events };
+  const hydrated = events.find((row) => row.seq === result.event.seq);
+  return { ...result, ...(hydrated ? { event: hydrated } : {}), events };
+}
+
 async function shutdown() {
   if (closing) return; closing = true;
-  const serverClosed = new Promise((resolve) => server.close(resolve));
-  for (const socket of controlSockets) socket.destroy();
-  await Promise.allSettled([serverClosed, receiver.close(), codexBridge?.close()]);
-  await store.close();
-  await daemonLock.close().catch(() => {});
-  await Promise.allSettled([paths.controlSocket, paths.controlToken, paths.daemon, paths.daemonLock].map((file) => fsp.unlink(file))); process.exit(0);
+  const problems = await shutdownResources({ server, controlSockets, receiver, store, daemonLock, paths });
+  for (const problem of problems) process.stderr.write(`shutdown incomplete: ${/^[A-Z0-9_]{1,64}$/.test(problem.reason?.code ?? "") ? problem.reason.code : "INTERNAL_FAILURE"}\n`);
+  process.exit(problems.length > 0 ? 1 : 0);
 }
 // A written connection is held until the receiver closes it. When our own bound ends the hold
 // first, that is written down: the bound stops an unbounded hold, it does not promise that the
@@ -170,5 +229,5 @@ function publicSendArgs(args) {
   }
   return args;
 }
-function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter((item) => item && item !== "codex-wake"))].sort(); if (names.some((name) => !["code-review", "milestone", "codex-wake-bridge"].includes(name))) throw new Error("unsupported extension"); return names; }
+function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); if (names.some((name) => !["code-review", "milestone"].includes(name))) throw new Error("unsupported extension"); return names; }
 process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown);

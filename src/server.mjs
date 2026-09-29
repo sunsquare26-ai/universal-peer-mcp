@@ -1,13 +1,12 @@
-import { CodexWake, codexWakeTools } from "./extensions/codex-wake/index.mjs";
 import { controlCall, ensureDaemon } from "./core/control.mjs";
+import { observeBuild, compareBuilds } from "./core/build-identity.mjs";
 import { statePaths } from "./core/state-paths.mjs";
 import { createFacade } from "./mcp/facade.mjs";
 import { toolDefinitions } from "./mcp/tools.mjs";
 import { loadTargets, targetTableDigest } from "./core/target-config.mjs";
 
+const buildObservation = observeBuild();
 const paths = statePaths();
-const wakeEnabled = (process.env.CLAUDE_PEER_MCP_EXTENSIONS ?? "").split(",").map((s) => s.trim()).includes("codex-wake");
-const codexWake = wakeEnabled ? new CodexWake({ root: paths.root }) : null;
 await ensureDaemon();
 const daemon = await controlCall("daemon_status");
 const admin = daemon.admin === true;
@@ -56,7 +55,7 @@ function orderedTable() {
 
 const facade = createFacade(async () => {
   const reading = await orderedTable();
-  return { tools: [...toolDefinitions(Object.keys(reading.table), { admin, extensions: enabledExtensions, requestedExtensions }), ...(wakeEnabled ? codexWakeTools() : [])], callTool: (name, args) => callTool(reading, name, args) };
+  return { tools: toolDefinitions(Object.keys(reading.table), { admin, extensions: enabledExtensions, requestedExtensions }), callTool: (name, args) => callTool(reading, name, args) };
 });
 
 // A call that names no alias can still reach a target. A milestone ACK recovery is aimed by the
@@ -69,8 +68,6 @@ const facade = createFacade(async () => {
 const REACHES_A_TARGET_UNNAMED = new Set(["milestone_recover_ack"]);
 
 async function callTool(reading, name, args) {
-  if (codexWake && name === "codex_status") return codexWake.status(args);
-  if (codexWake && name === "codex_wake") return codexWake.wake(args);
   const { table, unreadable } = reading;
   const aliases = Object.keys(table);
   const digest = targetTableDigest(table);
@@ -108,7 +105,8 @@ async function callTool(reading, name, args) {
   const result = await controlCall(name, args, { expect: checkedBinding });
   if (name !== "daemon_status") return result;
   const advertisedTargetCount = aliases.length;
-  const counts = { advertisedTargetCount, targetCountMismatch: result.targetCount !== advertisedTargetCount, targetTableMismatch: result.targetsDigest !== digest };
+  const serverBuild = buildObservation();
+  const counts = { serverBuild, buildMismatch: compareBuilds(serverBuild, result.daemonBuild), advertisedTargetCount, targetCountMismatch: result.targetCount !== advertisedTargetCount, targetTableMismatch: result.targetsDigest !== digest };
   const extensionMismatch = JSON.stringify(requestedExtensions) !== JSON.stringify(enabledExtensions);
   if (!extensionMismatch && requestedExtensions.length === 0) return { ...result, ...counts };
   return { ...result, ...counts, requestedExtensions, extensionMismatch };
@@ -119,6 +117,7 @@ async function callTool(reading, name, args) {
 function targetUnavailable(empty) {
   const error = new Error(empty ? "the target table is empty; no alias is allowlisted" : "target alias is not allowlisted");
   error.code = "TARGET_UNAVAILABLE";
+  error.diagnostic = empty ? "target_table_empty" : "alias_not_allowlisted";
   return error;
 }
 
@@ -129,6 +128,7 @@ function targetUnavailable(empty) {
 function staleTargetTable() {
   const error = new Error("the running daemon holds a different target table than this call was checked against; restart the daemon");
   error.code = "TARGET_UNAVAILABLE";
+  error.diagnostic = "target_table_stale";
   return error;
 }
 
@@ -139,6 +139,7 @@ function staleTargetTable() {
 function targetTableUnreadable() {
   const error = new Error("the target table could not be read; no alias is allowlisted until it can be");
   error.code = "TARGET_UNAVAILABLE";
+  error.diagnostic = "target_table_unreadable";
   return error;
 }
 export const MAX_STDIN_FRAME_BYTES = 1024 * 1024;
@@ -165,4 +166,4 @@ process.stdin.on("data", (chunk) => {
 });
 async function handle(line) { let request; try { request = JSON.parse(line); } catch { return write({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }); } const response = await facade.handle(request); if (response !== null) write(response); }
 function write(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
-function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); return names.filter((name) => ["code-review", "milestone", "codex-wake-bridge"].includes(name)); }
+function parseExtensions(value) { if (!value) return []; const names = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))].sort(); return names.filter((name) => ["code-review", "milestone"].includes(name)); }

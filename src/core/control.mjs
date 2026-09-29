@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
+import { targetDiagnostic } from "./target-diagnostics.mjs";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import net from "node:net";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -9,16 +11,73 @@ import { localPeerPid } from "../adapters/claude-native-v1/darwin-peerpid.mjs";
 import { normalizeProcStart, processStart, processUid } from "../adapters/claude-native-v1/darwin-procargs.mjs";
 import { assertPrivateFile, ensurePrivateDirectory, LEGACY_STATE_DIR_ENV, STATE_DIR_ENV, statePaths } from "./state-paths.mjs";
 
-export async function ensureDaemon({ root, timeoutMs = 10_000 } = {}) {
+// The daemon is a bun program, not "whatever runtime its caller happens to be on". Everything it
+// loads reaches src/adapters/claude-native-v1/darwin-procargs.mjs, whose second line is
+// `import { dlopen, FFIType, ptr } from "bun:ffi"`, so a daemon started on node dies on its first
+// import. Spawning `process.execPath` makes the daemon's runtime a property of whoever called, and
+// the child is detached with its stdio ignored, so there is nothing on this side to see it die:
+// its exit races the readiness poll below and usually loses, and the caller is handed
+// `readiness_timeout` ten seconds later. That names the symptom of a daemon that never came up and
+// never the reason, which is the same silence this repair is about everywhere else. So the
+// executable is decided before anything is spawned or reclaimed, and a machine with no bun on it
+// is told so at once, naming every place that was looked in.
+const BUN_SEARCH_REPORT_LIMIT = 24;
+
+function executableProblem(candidate) {
+  try {
+    if (!fs.statSync(candidate).isFile()) return "not a regular file";
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return null;
+  } catch (error) {
+    return error.code === "ENOENT" ? "not present" : error.code === "EACCES" ? "not executable" : error.code ?? "unreadable";
+  }
+}
+
+// The caller's own executable counts only when it is bun, and under bun that is the bun binary
+// whatever it has been renamed to — which is why the running runtime is asked first and the file
+// name only stands in for it. Everything after it is a place bun is installed, in the order a
+// person would look: the install this shell was configured with, the default install, then PATH.
+export function resolveBunExecutable({ execPath = process.execPath, env = process.env, home = os.homedir(), runningOnBun = typeof globalThis.Bun !== "undefined" } = {}) {
+  const candidates = [];
+  if (runningOnBun || path.basename(execPath) === "bun") candidates.push([execPath, "process.execPath"]);
+  if (typeof env.BUN_INSTALL === "string" && env.BUN_INSTALL !== "") candidates.push([path.join(env.BUN_INSTALL, "bin", "bun"), "BUN_INSTALL"]);
+  if (typeof home === "string" && home !== "") candidates.push([path.join(home, ".bun", "bin", "bun"), "home install"]);
+  for (const directory of String(env.PATH ?? "").split(path.delimiter)) if (directory !== "") candidates.push([path.join(directory, "bun"), "PATH"]);
+
+  const looked = [];
+  for (const [candidate, source] of candidates) {
+    const problem = executableProblem(candidate);
+    if (problem === null) return candidate;
+    looked.push(`${candidate} (${source}: ${problem})`);
+  }
+  const shown = looked.slice(0, BUN_SEARCH_REPORT_LIMIT);
+  const where = looked.length === 0
+    ? "nowhere: the caller is not on bun, and neither BUN_INSTALL, a home directory nor PATH named a place to look"
+    : `${shown.join("; ")}${looked.length > shown.length ? `; and ${looked.length - shown.length} more` : ""}`;
+  const error = new Error(`the peer daemon runs on bun (its adapters import bun:ffi) and no bun executable was found. Looked at: ${where}`);
+  error.code = "BUN_NOT_FOUND";
+  error.looked = looked;
+  throw error;
+}
+
+export async function ensureDaemon({ root, timeoutMs = 10_000, runtime } = {}) {
   const paths = statePaths(root); await ensurePrivateDirectory(paths.root);
   const live = await readLive(paths); if (live) return live;
+  // Before reclaim, so a machine that cannot start a daemon does not first delete the traces of
+  // the last one that ran.
+  const bun = resolveBunExecutable(runtime);
   await reclaimDeadDaemon(paths);
   const daemonScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../daemon.mjs");
-  const child = spawn("bun", [daemonScript], { detached: true, stdio: "ignore", env: daemonEnvironment(paths.root) }); child.unref();
+  const child = spawn(bun, [daemonScript], { detached: true, stdio: "ignore", env: daemonEnvironment(paths.root) }); child.unref();
+  let startupFailure = null;
+  child.once("error", () => { startupFailure = daemonStartFailure("spawn_error"); });
+  child.once("exit", (code, signal) => { startupFailure = daemonStartFailure(Number.isInteger(code) ? `exit_code_${code}` : signal ? "terminated_by_signal" : "exited"); });
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) { const row = await readLive(paths); if (row) return row; await new Promise((resolve) => setTimeout(resolve, 25)); }
-  throw new Error("daemon readiness timed out");
+  while (Date.now() < deadline) { const row = await readLive(paths); if (row) return row; if (startupFailure) throw startupFailure; await new Promise((resolve) => setTimeout(resolve, 25)); }
+  throw daemonStartFailure("readiness_timeout");
 }
+
+function daemonStartFailure(reason) { return Object.assign(new Error(`daemon startup failed: ${reason}`), { code: "DAEMON_START_FAILED" }); }
 
 // The daemon is told where its state directory is under the current name, and the old name is
 // taken off the child's environment rather than left next to it. A parent that is itself running
@@ -40,13 +99,21 @@ function daemonEnvironment(root) {
 // the one it is holding (src/daemon.mjs). Neither check is the other's backstop — this one keeps
 // the bytes off a stranger's socket, and that one is the enforcement, because it is the side that
 // executes.
+export function controlTimeoutMs(method, args = {}) {
+  if (["peer_wait", "milestone_wait", "code_review_wait"].includes(method)) {
+    const requested = args.timeoutMs ?? 30_000;
+    return Number.isInteger(requested) && requested > 0 && requested <= 300_000 ? requested + 10_000 : 10_000;
+  }
+  return 10_000;
+}
+
 export async function controlCall(method, args = {}, { root, expect = null } = {}) {
   const paths = statePaths(root); const daemon = await ensureDaemon({ root });
   await assertPrivateFile(paths.controlToken, { maxBytes: 256 }); const token = (await fsp.readFile(paths.controlToken, "utf8")).trim();
   const request = { token, clientPid: process.pid, clientProcStart: processStart(), requestId: crypto.randomUUID(), method, args, ...(expect === null ? {} : { expect }) };
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ path: paths.controlSocket }); let buffer = ""; let settled = false;
-    const timer = setTimeout(() => finish(new Error("control request timed out")), 310_000);
+    const timer = setTimeout(() => finish(new Error("control request timed out")), controlTimeoutMs(method, args));
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); socket.destroy(); error ? reject(error) : resolve(value); };
     socket.once("error", finish);
     socket.once("connect", () => {
@@ -58,7 +125,7 @@ export async function controlCall(method, args = {}, { root, expect = null } = {
       }
       catch (error) { finish(error); }
     });
-    socket.setEncoding("utf8"); socket.on("data", (chunk) => { buffer += chunk; if (Buffer.byteLength(buffer) > 1024 * 1024) return finish(new Error("control response too large")); const newline = buffer.indexOf("\n"); if (newline < 0) return; let response; try { response = JSON.parse(buffer.slice(0, newline)); } catch { return finish(new Error("invalid control response")); } if (response.requestId !== request.requestId) return finish(new Error("control response correlation mismatch")); if (response.ok) return finish(null, response.result); const error = new Error(typeof response.error?.message === "string" ? response.error.message : "control request failed"); error.code = typeof response.error?.code === "string" ? response.error.code : "INTERNAL_FAILURE"; finish(error); });
+    socket.setEncoding("utf8"); socket.on("data", (chunk) => { buffer += chunk; if (Buffer.byteLength(buffer) > 1024 * 1024) return finish(new Error("control response too large")); const newline = buffer.indexOf("\n"); if (newline < 0) return; let response; try { response = JSON.parse(buffer.slice(0, newline)); } catch { return finish(new Error("invalid control response")); } if (response.requestId !== request.requestId) return finish(new Error("control response correlation mismatch")); if (response.ok) return finish(null, response.result); const error = new Error(typeof response.error?.message === "string" ? response.error.message : "control request failed"); error.code = typeof response.error?.code === "string" ? response.error.code : "INTERNAL_FAILURE"; error.diagnostic = targetDiagnostic(response.error?.diagnostic); finish(error); });
   });
 }
 
@@ -68,6 +135,7 @@ export async function controlCall(method, args = {}, { root, expect = null } = {
 function unboundDaemon() {
   const error = new Error("the daemon this call was checked against has been replaced; re-read the target table and check again");
   error.code = "TARGET_UNAVAILABLE";
+  error.diagnostic = "checked_daemon_changed";
   return error;
 }
 
