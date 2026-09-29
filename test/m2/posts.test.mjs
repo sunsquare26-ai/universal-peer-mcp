@@ -5,7 +5,7 @@ import path from "node:path";
 import { InboundSpool } from "../../src/core/inbound-spool.mjs";
 import { PeerCore, frameObserver } from "../../src/core/peer-core.mjs";
 import { statePaths } from "../../src/core/state-paths.mjs";
-import { acceptPost, ackInbox, inbox, linkUnmatched, recipientMessageId, uuidv5 } from "../../src/core/posts.mjs";
+import { acceptPost, ackInbox, inbox, linkUnmatched, recipientMessageId, unaddressed, uuidv5 } from "../../src/core/posts.mjs";
 import { EventStore } from "../../src/core/events.mjs";
 import { openStore, tempRoot } from "../m1/helpers.mjs";
 
@@ -70,7 +70,9 @@ test("one id, many arrivals (frame + control + restart): one post, duplicates re
   expect(again.rows("peer_post_conflict")).toHaveLength(1);
   expect(again.rows("peer_post_conflict")[0].bodyFile).toBeUndefined();
   expect(await again.files()).toBe(1);
-  expect(inbox(again.store.events, "codex-main")).toHaveLength(1);
+  // M4: a frame post without `to=<alias>` is held unaddressed and shown to no session's inbox.
+  expect(inbox(again.store.events, "codex-main")).toHaveLength(0);
+  expect(unaddressed(again.store.events)).toHaveLength(1);
 });
 
 test("concurrent arrivals of one id: exactly one post and no orphan body file", async () => {

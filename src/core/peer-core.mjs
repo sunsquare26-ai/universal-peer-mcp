@@ -13,7 +13,7 @@ import { encodeJsonAngles, outboundFrames, parseMarker, parseReplyHeader, sender
 import { directSend } from "../adapters/claude-native-v1/transport.mjs";
 import { protocolHeader } from "./protocol-header.mjs";
 import { senderFields } from "./sender-auth.mjs";
-import { acceptPost, bodyDigest, quarantine } from "./posts.mjs";
+import { acceptPost, bodyDigest, postRecipient, quarantine } from "./posts.mjs";
 
 const INTERNAL_SEND = Symbol("universal-peer-mcp.internal-send");
 export function milestoneSendOptions(options = {}) { return Object.freeze({ [INTERNAL_SEND]: true, ...options }); }
@@ -241,7 +241,7 @@ export class PeerCore extends EventEmitter {
       const header = protocolHeader(content);
       if (header?.verb === "PEER_POST" && header.messageId) {
         if (unauthenticated) { await quarantine(this.store, { reason: "sender_unauthenticated", content, header, who }); return null; }
-        await acceptPost({ store: this.store, spool: this.inboundSpool, messageId: header.messageId, body: content, who, source: "frame" });
+        await acceptPost({ store: this.store, spool: this.inboundSpool, messageId: header.messageId, recipient: postRecipient(content), body: content, who, source: "frame" });
         return null;
       }
       if (unauthenticated) { await quarantine(this.store, { reason: "sender_unauthenticated", content, header, who }); return null; }

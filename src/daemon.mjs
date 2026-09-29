@@ -31,6 +31,12 @@ import { dayOf } from "./core/days.mjs";
 import { loadSettings, settingsStatus } from "./core/settings.mjs";
 import { createSenderResolver } from "./core/sender-auth.mjs";
 import { acceptPost, ackInbox, bodyDigest, inbox, linkUnmatched, recipientMessageId } from "./core/posts.mjs";
+import { createCodexResolver } from "./core/codex-identity.mjs";
+import { aliasOfCodexThread, codexPeersDigest, codexPeersPath, identityKey, listPeers, loadCodexPeers, registerPeer, removePeer, resolvePeer } from "./core/peer-directory.mjs";
+import { processParent, provePermissionMode, readProcessArgv } from "./adapters/claude-native-v1/darwin-procargs.mjs";
+import { readRebindState } from "./core/rebind-sidecar.mjs";
+import { DEFAULT_SESSIONS_DIR } from "./adapters/claude-native-v1/registry.mjs";
+import { sameUuid } from "./core/limits.mjs";
 
 const buildObservation = observeBuild();
 const paths = statePaths(); const admin = process.env.CLAUDE_PEER_MCP_ADMIN === "1";
@@ -64,6 +70,13 @@ await daemonLock.writeFile(`${JSON.stringify({ pid: process.pid, procStart: self
 // an exception (src/core/target-table.mjs), which is the same rule stated more directly: a cwd that
 // is gone throws here, naming the directory, exactly as every other invalid table does.
 const tableWatch = new TargetTableWatch({ file: paths.targets });
+// M4: Claude session rows are read from ~/.claude/sessions unless the daemon is started with
+// UNIVERSAL_PEER_CLAUDE_SESSIONS_DIR (test daemons only: it keeps a test lane off the live registry).
+const claudeSessionsDir = typeof process.env.UNIVERSAL_PEER_CLAUDE_SESSIONS_DIR === "string" && process.env.UNIVERSAL_PEER_CLAUDE_SESSIONS_DIR !== "" ? path.resolve(process.env.UNIVERSAL_PEER_CLAUDE_SESSIONS_DIR) : undefined;
+// M4: Codex peers live beside the target table in their own file (src/core/peer-directory.mjs).
+const codexPeersFile = codexPeersPath(paths.root);
+const codexWatch = new TargetTableWatch({ file: codexPeersFile, load: loadCodexPeers, digest: codexPeersDigest });
+let codexPeers = {};
 const startupTable = await tableWatch.read();
 if (startupTable.unreadable) throw startupTable.unreadable;
 let targets = startupTable.table;
@@ -73,6 +86,7 @@ let targets = startupTable.table;
 // restart. What the check means is unchanged: a command still executes only against the table its
 // caller checked it against.
 let targetsDigest = startupTable.digest;
+{ const reading = await codexWatch.read(); if (!reading.unreadable) codexPeers = reading.table; }
 // M1 observation. One id per daemon process, written as the first row this process appends, so a
 // timeline read days later can say which daemon generation handled each part of it and where a
 // restart fell. The alarm sink is local and durable (src/core/alerts.mjs); the ledger reports its
@@ -108,7 +122,7 @@ const receiver = Object.keys(targets).length > 0
     // A frame whose writer the kernel could not name with the frame is refused before it gets
     // this far. Both are recorded so that "refused", "arrived and correlated to nothing" and
     // "nothing arrived" are three different answers here rather than one absence.
-    receiverOptionsForState(paths, { onFrameRefused: async (refusal) => { await store.append("peer_frame_refused", refusal); }, onReclaimSkipped: async (detail) => { await store.append("peer_stale_registry_skipped", detail); } })
+    { ...receiverOptionsForState(paths, { onFrameRefused: async (refusal) => { await store.append("peer_frame_refused", refusal); }, onReclaimSkipped: async (detail) => { await store.append("peer_stale_registry_skipped", detail); } }), ...(claudeSessionsDir ? { sessionsDir: claudeSessionsDir } : {}) }
   )
   : { address: "uds:/unpublished/universal-peer-mcp.sock", sessionId: null, close: async () => {} };
 // The half of succession that rewrites the operator's table lives out here, with the files and the
@@ -128,7 +142,8 @@ const rebindTarget = createSessionRebinder({
 });
 // M2: inbound frames and control-socket posts are attributed to a Claude session only through the
 // kernel pid, Claude Code's registry row and the operator's table (src/core/sender-auth.mjs).
-const resolveSender = createSenderResolver({ allowlist: () => targets, selfPid: process.pid });
+const resolveSender = createSenderResolver({ allowlist: () => targets, selfPid: process.pid, ...(claudeSessionsDir ? { sessionsDir: claudeSessionsDir } : {}) });
+const resolveCodex = createCodexResolver();
 core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, rebind: rebindTarget, senderResolver: (peer) => resolveSender(peer) });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
 if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });
@@ -191,6 +206,11 @@ function assertChecked(expect) {
 // per distinct bad version: dropping to an empty table would unpublish every alias silently, and
 // serving the old one is safe because the caller's digest will not match it and the call is refused.
 async function refreshTargets() {
+  const codexReading = await codexWatch.read();
+  if (codexReading.changed) {
+    if (codexReading.unreadable) await store.append("peer_directory_reload_failed", { reason: "codex_peers_unreadable" }).catch(() => {});
+    else { codexPeers = codexReading.table; if (codexReading.digestChanged) await store.append("peer_directory_reloaded", { table: "codex", peerCount: Object.keys(codexPeers).length, changedAliases: codexReading.changedAliases }).catch(() => {}); }
+  }
   const reading = await tableWatch.read();
   if (!reading.changed) return;
   if (reading.unreadable) { await store.append("target_table_reload_failed", { reason: "target_table_unreadable" }).catch(() => {}); return; }
@@ -210,8 +230,12 @@ async function dispatch(method, args, caller = null) {
   if (method === "peer_list_events") { const listing = core.events(args); return withInlineBodies({ ...listing, events: listing.events.map(publicLedgerEvent) }, caller, method); }
   if (method === "trace_attempt") return recordAttempt(store, args);
   if (method === "peer_post") return post(args, caller);
-  if (method === "peer_inbox") { if (typeof args.recipient !== "string" || !/^[a-z][a-z0-9-]{1,47}$/.test(args.recipient)) throw Object.assign(new Error("recipient must be an alias"), { code: "INVALID_CONTROL_ARGUMENTS" }); return withInlineBodies({ events: inbox(store.events, args.recipient, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0 }) }, caller, method); }
-  if (method === "peer_inbox_ack") return ackInbox(store, { messageId: args.messageId, reader: { readerPid: caller?.pid, readerProcStart: caller?.procStart } });
+  if (method === "peer_inbox") return readInbox(args, caller);
+  if (method === "peer_inbox_ack") return ackOwnInbox(args, caller);
+  if (method === "peer_register") return register(args, caller);
+  if (method === "peer_unregister") return unregister(args, caller);
+  if (method === "peer_directory") return { peers: listPeers({ claude: targets, codex: codexPeers }) };
+  if (method === "peer_whoami") { const who = await identifyCaller(caller); return who.authenticated ? { authenticated: true, alias: who.alias, kind: who.kind } : { authenticated: false, kind: who.kind ?? null, reason: who.reason, ...(who.rebind ? { rebind: who.rebind } : {}) }; }
   if (method === "peer_link_unmatched") return linkUnmatched(store, { sourceSeq: args.sourceSeq, messageId: args.messageId, as: args.as, verdict: args.verdict ?? null, by: { linkedByPid: caller?.pid } });
   if (method === "inbound_body_dispose") return disposeInboundBody({ root: paths.root, store, sourceSeq: args.sourceSeq, disposition: args.disposition });
   if (method === "trace_message") { if (typeof args.messageId !== "string" || !/^[0-9a-f-]{36}$/i.test(args.messageId)) throw Object.assign(new Error("messageId must be a uuid"), { code: "INVALID_CONTROL_ARGUMENTS" }); return traceMessage(store.events, args.messageId); }
@@ -255,17 +279,154 @@ async function withInlineBodies(result, caller = null, method = null) {
 async function post(args, caller) {
   const allowed = new Set(["to", "body", "groupId"]);
   if (!args || typeof args !== "object" || Object.keys(args).some((k) => !allowed.has(k)) || !Array.isArray(args.to) || args.to.length === 0 || args.to.length > 8 || typeof args.body !== "string" || args.body.length === 0) throw Object.assign(new Error("peer_post takes to[1..8], body, optional groupId"), { code: "INVALID_CONTROL_ARGUMENTS" });
-  const auth = await resolveSender({ pid: caller?.pid, procStart: caller?.procStart }, { walk: true });
-  const who = { peerPid: caller?.pid, peerProcStart: caller?.procStart, ...(auth.authenticated ? { senderAlias: auth.alias, senderSessionId: auth.sessionId } : { senderAuth: auth.reason }) };
-  if (!auth.authenticated) { await store.append("peer_post_refused", { reason: auth.reason, ...bodyDigest(args.body), ...who }); throw Object.assign(new Error("the calling process is not an allowlisted Claude session"), { code: "SENDER_UNAUTHENTICATED" }); }
-  const groupId = args.groupId ?? crypto.randomUUID();
+  const auth = await identifyCaller(caller);
+  const who = { peerPid: caller?.pid, peerProcStart: caller?.procStart, ...senderOf(auth) };
+  if (!auth.authenticated) { await store.append("peer_post_refused", { reason: auth.reason, ...bodyDigest(args.body), ...who }); throw Object.assign(new Error("the calling process is not a registered peer session"), { code: "SENDER_UNAUTHENTICATED" }); }
+  // M4 deterministic routing: every name resolves to exactly one registered session before anything
+  // is written; an unknown name refuses the whole send (nothing half-sent to a group).
   const recipients = [...new Set(args.to)];
-  const results = [];
-  for (const recipient of recipients) {
+  const resolved = recipients.map((alias) => [alias, resolvePeer(alias, { claude: targets, codex: codexPeers })]);
+  const unknown = resolved.filter(([, peer]) => peer === null).map(([alias]) => alias);
+  if (unknown.length) { await store.append("peer_post_refused", { reason: "unknown_recipient", unknownCount: unknown.length, ...bodyDigest(args.body), ...who }); throw Object.assign(new Error(`not a registered peer: ${unknown.join(", ")} (see: universal-peer-mcp peers)`), { code: "UNKNOWN_RECIPIENT" }); }
+  const groupId = args.groupId ?? crypto.randomUUID();
+  const results = []; const deliveredTo = new Map();
+  for (const [recipient, peer] of resolved) {
+    const key = identityKey(peer);
+    // Two names for one session get one message (design §3-3).
+    if (deliveredTo.has(key)) { results.push({ recipient, state: "same_session", deliveredAs: deliveredTo.get(key) }); continue; }
+    deliveredTo.set(key, recipient);
     const messageId = recipientMessageId(groupId, recipient);
-    results.push({ recipient, messageId, ...(await acceptPost({ store, spool: inboundSpool, messageId, recipient, body: args.body, who, source: "control" })) });
+    const recipientFields = { recipientKind: peer.kind, ...(peer.kind === "claude" ? { recipientSessionId: peer.sessionId } : { recipientThreadId: peer.threadId }) };
+    results.push({ recipient, messageId, ...(await acceptPost({ store, spool: inboundSpool, messageId, recipient, body: args.body, who: { ...who, ...recipientFields }, source: "control" })) });
   }
   return { groupId, from: auth.alias, results };
+}
+
+// M4: who is calling, as one of the registered peers. Claude first (a registry row in the caller's
+// ancestry, src/core/sender-auth.mjs), because a Claude session started from a Codex shell inherits
+// the thread variable and is still the Claude session; Codex only when no Claude row is found.
+async function identifyCaller(caller) {
+  const claude = await resolveSender({ pid: caller?.pid, procStart: caller?.procStart }, { walk: true });
+  if (claude.authenticated) return { authenticated: true, kind: "claude", alias: claude.alias, sessionId: claude.sessionId, pid: claude.pid, procStart: claude.procStart, cwd: claude.cwd };
+  if (claude.reason === "session_not_allowlisted") {
+    const rebound = await rebindCaller(claude);
+    if (rebound) return rebound;
+    return { authenticated: false, kind: "claude", reason: claude.reason, ...(claude.rebind ? { rebind: claude.rebind } : {}), sessionId: claude.sessionId, pid: claude.pid, procStart: claude.procStart, cwd: claude.cwd };
+  }
+  if (claude.reason !== "no_session_row") return { authenticated: false, kind: "claude", reason: claude.reason };
+  const codex = resolveCodex(caller?.pid);
+  if (!codex.proven) return codex.reason === "no_codex_thread" ? { authenticated: false, kind: null, reason: "no_session" } : { authenticated: false, kind: "codex", reason: codex.reason };
+  const alias = aliasOfCodexThread(codexPeers, codex.threadId);
+  if (!alias) return { authenticated: false, kind: "codex", reason: "session_not_allowlisted", threadId: codex.threadId };
+  return { authenticated: true, kind: "codex", alias, threadId: codex.threadId, pid: codex.carrierPid, procStart: codex.carrierProcStart };
+}
+function senderOf(auth) {
+  if (!auth.authenticated) return { senderAuth: auth.reason };
+  return auth.kind === "claude" ? { senderAlias: auth.alias, senderSessionId: auth.sessionId, senderSessionPid: auth.pid, senderSessionProcStart: auth.procStart } : { senderAlias: auth.alias, senderKind: "codex", senderThreadId: auth.threadId };
+}
+
+// M4 restart per session: a Claude session that is not in the table but was started with
+// `--resume <id>` for exactly one alias's session is offered to the existing succession proof
+// (src/core/session-rebind.mjs → registry.resolveSuccessor), which keeps every M2 refusal: same
+// process (/clear, picker), --fork-session, chained succession, cwd, the daemon's own row. No proof,
+// or proof for two aliases, is no rebind.
+async function rebindCaller(claude) {
+  if (!Number.isInteger(claude.pid)) return null;
+  const claims = resumeClaims(claude.pid);
+  if (claims.ids.length === 0) return null;
+  let history = {}; try { history = (await readRebindState(paths.rebindState)).history ?? {}; } catch {}
+  const current = Object.keys(targets).filter((alias) => claims.ids.some((id) => sameUuid(id, targets[alias].sessionId)));
+  const older = Object.keys(targets).filter((alias) => !current.includes(alias) && claims.ids.some((id) => (history[alias] ?? []).some((old) => sameUuid(old, id))));
+  const aliases = [...new Set([...current, ...older])];
+  if (aliases.length !== 1) return null;
+  const alias = aliases[0]; const expectedId = targets[alias].sessionId;
+  const fail = async (reason, recovery) => { claude.rebind = reason; await store.append("target_rebind_failed", { alias, expectedSessionId: expectedId, reason, candidateCount: 0, recovery }).catch(() => {}); return null; };
+  if (claims.fork) return fail("rebind_fork_refused", "--fork-session starts a new conversation; it never inherits an alias. Register it by hand: universal-peer-mcp register --alias <name>");
+  // The same process under a new id (/clear, picker) is never inherited, whatever its argv says: the
+  // ledger remembers which process last proved the alias's current id.
+  const last = [...store.events].reverse().find((e) => (e.senderSessionId === expectedId || ((e.type === "peer_registered" || e.type === "peer_session_rebound") && e.sessionId === expectedId)) && Number.isInteger(e.senderSessionPid ?? e.sessionPid));
+  if (last && (last.senderSessionPid ?? last.sessionPid) === claude.pid && normalizeProcStart(last.senderSessionProcStart ?? last.sessionProcStart) === normalizeProcStart(claude.procStart)) {
+    return fail("rebind_same_process", "the same process now holds a new session id (/clear or picker); re-register by hand: universal-peer-mcp register --alias <name> --replace");
+  }
+  // Everything else — a current id, or an older id of this alias (chained: refused inside) — goes to
+  // the existing succession proof, which records its own refusal.
+  try { await rebindTarget({ alias, expected: targets[alias], options: claudeSessionsDir ? { sessionsDir: claudeSessionsDir } : {} }); }
+  catch (error) { claude.rebind = targetDiagnostic(error?.diagnostic) ?? "rebind_failed"; return null; }
+  const again = await resolveSender({ pid: claude.pid, procStart: claude.procStart }, { walk: false });
+  if (!again.authenticated) return null;
+  await store.append("peer_session_rebound", { alias: again.alias, sessionId: again.sessionId, previousSessionId: expectedId, sessionPid: again.pid, sessionProcStart: again.procStart }).catch(() => {});
+  return { authenticated: true, kind: "claude", alias: again.alias, sessionId: again.sessionId, pid: again.pid, procStart: again.procStart, cwd: again.cwd, rebound: true };
+}
+
+// The `--resume <id>` receipts in the kernel's argv of a session process and its launchers, stopping
+// at another session's process (the same boundary the succession proof uses).
+function resumeClaims(pid) {
+  const ids = []; let fork = false; let current = pid; const seen = new Set();
+  let boundary = new Set(); try { boundary = new Set(fs.readdirSync(claudeSessionsDir ?? DEFAULT_SESSIONS_DIR).map((n) => /^(\d+)\.json$/.exec(n)?.[1]).filter(Boolean).map(Number)); } catch {}
+  for (let depth = 0; depth <= 8; depth += 1) {
+    if (!Number.isInteger(current) || current <= 1 || seen.has(current) || (depth > 0 && boundary.has(current))) break;
+    seen.add(current);
+    let argv = null; try { argv = readProcessArgv(current); } catch {}
+    if (Array.isArray(argv)) {
+      if (argv.includes("--fork-session")) fork = true;
+      argv.forEach((token, i) => { if ((token === "--resume" || token === "-r") && typeof argv[i + 1] === "string" && /^[0-9a-f-]{36}$/i.test(argv[i + 1])) ids.push(argv[i + 1].toLowerCase()); else if (typeof token === "string" && token.startsWith("--resume=") && /^[0-9a-f-]{36}$/i.test(token.slice(9))) ids.push(token.slice(9).toLowerCase()); });
+    }
+    try { current = processParent(current); } catch { break; }
+  }
+  return { ids, fork };
+}
+
+// M4: an inbox is read only by the session it belongs to. The alias comes from the proof, not from
+// the arguments; naming another alias is refused, never answered.
+async function readInbox(args, caller) {
+  const who = await identifyCaller(caller);
+  if (!who.authenticated) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason}); register first: universal-peer-mcp register --alias <name>`), { code: "SENDER_UNAUTHENTICATED" });
+  if (args.recipient !== undefined && args.recipient !== who.alias) { await store.append("peer_inbox_refused", { reason: "not_own_inbox", readerAlias: who.alias, readerPid: caller?.pid }).catch(() => {}); throw Object.assign(new Error(`this session is ${who.alias}; it cannot read another peer's inbox`), { code: "RECIPIENT_MISMATCH" }); }
+  return withInlineBodies({ alias: who.alias, events: inbox(store.events, who.alias, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0 }) }, caller, "peer_inbox");
+}
+async function ackOwnInbox(args, caller) {
+  const who = await identifyCaller(caller);
+  if (!who.authenticated) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason})`), { code: "SENDER_UNAUTHENTICATED" });
+  const row = store.events.find((e) => e.type === "peer_post" && typeof args.messageId === "string" && e.messageId === args.messageId.toLowerCase());
+  if (row && row.recipient !== who.alias) throw Object.assign(new Error(`message ${args.messageId} is not addressed to ${who.alias}`), { code: "NOT_RECIPIENT" });
+  return ackInbox(store, { messageId: args.messageId, reader: { readerPid: caller?.pid, readerProcStart: caller?.procStart, readerAlias: who.alias } });
+}
+
+// M4 onboarding. The session being registered runs this itself; its identity is proven the same way
+// a sender's is (kernel pid → Claude registry row, or kernel exec environment → Codex thread) and
+// nothing about it is taken from the arguments except the alias.
+async function register(args, caller) {
+  const allowed = new Set(["alias", "replace"]);
+  if (!args || typeof args !== "object" || Object.keys(args).some((k) => !allowed.has(k)) || typeof args.alias !== "string") throw Object.assign(new Error("peer_register takes alias and optional replace"), { code: "INVALID_CONTROL_ARGUMENTS" });
+  const who = await identifyCaller(caller);
+  let identity = null;
+  if (who.kind === "claude" && (who.authenticated || who.reason === "session_not_allowlisted")) {
+    if (typeof who.cwd !== "string") return refused("claude_session_without_cwd");
+    let cwd; try { cwd = await fsp.realpath(who.cwd); } catch { return refused("claude_cwd_missing"); }
+    let permissionMode = null;
+    for (const mode of ["bypass", "prompting"]) { try { provePermissionMode(mode, who.pid, who.procStart); permissionMode = mode; break; } catch {} }
+    if (!permissionMode) return refused("permission_mode_unproven", "the Claude session must be started with an explicit --permission-mode (for example: --permission-mode bypassPermissions) by absolute path");
+    identity = { kind: "claude", sessionId: who.sessionId, cwd, permissionMode };
+  } else if (who.kind === "codex" && (who.authenticated || who.reason === "session_not_allowlisted")) {
+    identity = { kind: "codex", threadId: who.threadId };
+  } else return refused(who.reason ?? "no_session");
+  let result;
+  try { result = await registerPeer({ targetsFile: paths.targets, codexFile: codexPeersFile, alias: args.alias, identity, replace: args.replace === true }); }
+  catch (error) { await store.append("peer_register_refused", { reason: typeof error?.code === "string" ? error.code : "INTERNAL_FAILURE", alias: /^[a-z][a-z0-9-]{1,47}$/.test(args.alias) ? args.alias : null, kind: identity.kind, peerPid: caller?.pid }).catch(() => {}); throw error; }
+  await refreshTargets();
+  if (result.state === "registered") await store.append("peer_registered", { alias: result.alias, kind: result.kind, ...(identity.kind === "claude" ? { sessionId: identity.sessionId, permissionMode: identity.permissionMode, sessionPid: who.pid, sessionProcStart: who.procStart } : { threadId: identity.threadId }), replaced: result.replaced, peerPid: caller?.pid });
+  return { ...result, ...(identity.kind === "claude" ? { sessionId: identity.sessionId, permissionMode: identity.permissionMode } : { threadId: identity.threadId }) };
+  async function refused(reason, hint = null) {
+    await store.append("peer_register_refused", { reason, peerPid: caller?.pid }).catch(() => {});
+    throw Object.assign(new Error(hint ?? `this process is not a Claude or Codex session this daemon can prove (${reason}); run the command from inside the session you want to register`), { code: "SESSION_UNPROVEN", reason });
+  }
+}
+async function unregister(args, caller) {
+  if (!args || typeof args.alias !== "string" || Object.keys(args).some((k) => k !== "alias")) throw Object.assign(new Error("peer_unregister takes alias"), { code: "INVALID_CONTROL_ARGUMENTS" });
+  const result = await removePeer({ targetsFile: paths.targets, codexFile: codexPeersFile, alias: args.alias });
+  await refreshTargets();
+  await store.append("peer_unregistered", { alias: result.alias, kind: result.kind, peerPid: caller?.pid });
+  return result;
 }
 
 // "Receiver read" for M1: a body handed out inline to a caller process is a read by that process.

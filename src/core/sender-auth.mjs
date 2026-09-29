@@ -41,8 +41,8 @@ export function createSenderResolver({ sessionsDir = DEFAULT_SESSIONS_DIR, allow
         if (depth === 0 && peer.procStart && normalizeProcStart(peer.procStart) !== live) return { authenticated: false, reason: "process_identity_changed", pid };
         const table = allowlist?.() ?? {};
         const alias = Object.keys(table).find((name) => sameUuid(table[name]?.sessionId ?? "", row.sessionId));
-        if (!alias) return { authenticated: false, reason: "session_not_allowlisted", pid, sessionId: row.sessionId };
-        return { authenticated: true, alias, sessionId: row.sessionId, pid, procStart: row.procStart, depth };
+        if (!alias) return { authenticated: false, reason: "session_not_allowlisted", pid, sessionId: row.sessionId, procStart: row.procStart, cwd: typeof row.cwd === "string" ? row.cwd : null, depth };
+        return { authenticated: true, alias, sessionId: row.sessionId, pid, procStart: row.procStart, cwd: typeof row.cwd === "string" ? row.cwd : null, depth };
       }
       if (!walk) break;
       try { pid = parentReader(pid); } catch { break; }

@@ -35,7 +35,7 @@ const MUTANTS = [
   ["spool stores the first line", "src/core/inbound-spool.mjs", "const header = protocolHeader(body); return header === null ? {} : { header };", "return { firstLine: body.split(\"\\n\")[0] };", "test/m1/retention.test.mjs"],
   // M2
   ["forged post accepted", "src/core/peer-core.mjs", "if (unauthenticated) { await quarantine(this.store, { reason: \"sender_unauthenticated\", content, header, who }); return null; }\n        await acceptPost(", "await acceptPost(", "test/m2/posts.test.mjs"],
-  ["other session allowlisted", "src/core/sender-auth.mjs", "if (!alias) return { authenticated: false, reason: \"session_not_allowlisted\", pid, sessionId: row.sessionId };", "if (!alias) return { authenticated: true, alias: \"friday-main\", sessionId: row.sessionId, pid, procStart: row.procStart, depth };", "test/m2/sender-auth.test.mjs"],
+  ["other session allowlisted", "src/core/sender-auth.mjs", "if (!alias) return { authenticated: false, reason: \"session_not_allowlisted\", pid, sessionId: row.sessionId, procStart: row.procStart, cwd: typeof row.cwd === \"string\" ? row.cwd : null, depth };", "if (!alias) return { authenticated: true, alias: \"friday-main\", sessionId: row.sessionId, pid, procStart: row.procStart, depth };", "test/m2/sender-auth.test.mjs"],
   ["recycled pid accepted", "src/core/sender-auth.mjs", "if (live === null || live !== normalizeProcStart(row.procStart)) return", "if (false) return", "test/m2/sender-auth.test.mjs"],
   ["concurrent duplicate becomes a second post", "src/core/posts.mjs", "(events) => (firstPost(events, messageId) ? refuse(\"POST_RACE\", \"lost the race\") : null)", "() => null", "test/m2/posts.test.mjs"],
   ["processed twice", "src/core/posts.mjs", "(events.some((e) => e.type === \"peer_post_processed\" && sameUuid(e.messageId, messageId)) ? refuse(\"ALREADY_PROCESSED\", \"already processed\") : null)", "null", "test/m2/posts.test.mjs"],
@@ -50,6 +50,26 @@ const MUTANTS = [
   ["broken file falls back to env", "src/core/settings.mjs", "    if (invalid) { out[key] = { value: null, source: \"config_invalid\" }; continue; }\n", "", "test/m2/settings.test.mjs"],
   ["refused frame keeps no digest", "src/core/peer-core.mjs", "if (typeof content === \"string\" && content.length > 0) digest = bodyDigest(content);", "void content;", "test/m0/reply-framing.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
+  ,
+  // M4
+  ["unaddressed post shown to every inbox", "src/core/posts.mjs", "e.seq > afterSeq && e.recipient === recipient && !processed", "e.seq > afterSeq && (e.recipient === recipient || e.recipient === \"*\") && !processed", "test/m4/units.test.mjs"],
+  ["frame recipient ignored", "src/core/peer-core.mjs", "recipient: postRecipient(content), ", "", "test/m4/units.test.mjs"],
+  ["read another session's inbox", "src/daemon.mjs", "if (args.recipient !== undefined && args.recipient !== who.alias) {", "if (false) {", "test/m4/multi-session.test.mjs"],
+  ["ack another session's message", "src/daemon.mjs", "if (row && row.recipient !== who.alias) throw", "if (false) throw", "test/m4/multi-session.test.mjs"],
+  ["unknown recipient half-sent", "src/daemon.mjs", "if (unknown.length) {", "if (false) {", "test/m4/multi-session.test.mjs"],
+  ["one session gets a group twice", "src/daemon.mjs", "if (deliveredTo.has(key)) {", "if (false) {", "test/m4/multi-session.test.mjs"],
+  ["unauthenticated reader served", "src/daemon.mjs", "if (!who.authenticated) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason}); register first", "if (false) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason}); register first", "test/m4/multi-session.test.mjs"],
+  ["codex thread without a codex host", "src/core/codex-identity.mjs", "if (!hostSeen) return", "if (false) return", "test/m4/units.test.mjs"],
+  ["codex thread without a rollout", "src/core/codex-identity.mjs", "if (!rollout(codexHome, threadId)) return", "if (false) return", "test/m4/registration.test.mjs"],
+  ["codex recycled pid accepted", "src/core/codex-identity.mjs", "if (before === null || before !== after) return", "if (false) return", "test/m4/units.test.mjs"],
+  ["alias silently taken over", "src/core/peer-directory.mjs", "if (!replace && holder) throw", "if (false) throw", "test/m4/registration.test.mjs"],
+  ["one session under two aliases", "src/core/peer-directory.mjs", "if (!replace && others.length) throw", "if (false) throw", "test/m4/registration.test.mjs"],
+  ["registration writes a field old builds refuse", "src/core/peer-directory.mjs", "nextTargets[alias] = { sessionId: id, cwd: identity.cwd, permissionMode: identity.permissionMode };", "nextTargets[alias] = { sessionId: id, cwd: identity.cwd, permissionMode: identity.permissionMode, kind: \"claude\" };", "test/m4/registration.test.mjs"],
+  ["registrations race", "src/core/peer-directory.mjs", "  return serializeByFile(targetsFile, async () => {\n    const targets = await readRaw(targetsFile); const codex = await readRaw(codexFile);\n    const id =", "  return (async () => {\n    const targets = await readRaw(targetsFile); const codex = await readRaw(codexFile);\n    const id =", "test/m4/units.test.mjs"],
+  ["/clear inherited on read", "src/daemon.mjs", "if (last && (last.senderSessionPid ?? last.sessionPid) === claude.pid", "if (false && last", "test/m4/restart-rebind.test.mjs"],
+  ["fork inherited on read", "src/daemon.mjs", "if (claims.fork) return fail(", "if (false) return fail(", "test/m4/restart-rebind.test.mjs"],
+  ["restarted session not rebound", "src/daemon.mjs", "    const rebound = await rebindCaller(claude);\n", "    const rebound = null;\n", "test/m4/restart-rebind.test.mjs"],
+  ["codex caller never proven", "src/daemon.mjs", "  const codex = resolveCodex(caller?.pid);\n", "  const codex = { proven: false, reason: \"no_codex_thread\" };\n", "test/m4/registration.test.mjs"]
 ];
 
 const root = process.cwd();

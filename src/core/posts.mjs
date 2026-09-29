@@ -70,9 +70,23 @@ export async function acceptPost({ store, spool, messageId, recipient = "*", bod
   return { state: "accepted", seq: row.seq };
 }
 
+// M4: an inbox holds only posts addressed to that alias. A post with no recipient ("*", a frame
+// without `to=`) is held unaddressed and shown to no session: with several sessions reading, "anyone"
+// would mean "whoever acks first" and a second reader processing it too.
 export function inbox(events, recipient, { afterSeq = 0 } = {}) {
   const processed = new Set(events.filter((e) => e.type === "peer_post_processed").map((e) => e.messageId.toLowerCase()));
-  return events.filter((e) => e.type === "peer_post" && e.seq > afterSeq && (e.recipient === recipient || e.recipient === "*") && !processed.has(e.messageId.toLowerCase()));
+  return events.filter((e) => e.type === "peer_post" && e.seq > afterSeq && e.recipient === recipient && !processed.has(e.messageId.toLowerCase()));
+}
+export function unaddressed(events) {
+  return events.filter((e) => e.type === "peer_post" && e.recipient === "*");
+}
+
+// The recipient a frame names on its first line (`PEER_POST v=1 message_id=… to=<alias>`), or "*".
+export function postRecipient(content) {
+  if (typeof content !== "string") return "*";
+  const line = content.split(/\r?\n/, 1)[0].slice(0, 1024);
+  const matches = line.split(/[ \t|]+/).filter((t) => t.toLowerCase().startsWith("to=")).map((t) => t.slice(3));
+  return matches.length === 1 && ALIAS.test(matches[0]) ? matches[0] : "*";
 }
 
 // Exactly once per id: the first ack writes the row, every later ack (any process, any restart)

@@ -9,6 +9,7 @@ import { sendDoorbell } from "./core/doorbell.mjs";
 // `universal-peer-mcp doorbell --thread <uuid> --message-id <uuid> [--alias <alias>]`
 // `universal-peer-mcp body-dispose --seq <n> --disposition processed|discard`
 // `universal-peer-mcp post --to a[,b] --body-file f [--group-id uuid]` | `inbox --recipient a` | `inbox-ack --message-id id`
+// `universal-peer-mcp register --alias <name> [--replace]` | `unregister --alias <name>` | `peers` | `whoami`   (M4)
 // `universal-peer-mcp link --seq <n> --message-id <request id> --as ack|reply [--verdict pass|fail]`
 //
 // With --ledger the file is read directly, read-only, and no daemon is contacted — the way to read
@@ -64,7 +65,23 @@ export async function observeCommand(command, args) {
     const { controlCall } = await import("./core/control.mjs");
     return controlCall("peer_post", { to, body, ...(option(args, "--group-id") ? { groupId: option(args, "--group-id") } : {}) });
   }
-  if (command === "inbox") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_inbox", { recipient: option(args, "--recipient") }); }
+  if (command === "inbox") { const { controlCall } = await import("./core/control.mjs"); const recipient = option(args, "--recipient"); return controlCall("peer_inbox", recipient ? { recipient } : {}); }
+  // M4 onboarding. `register` is run by the session being registered (its own shell), which is what
+  // proves it; the alias is the only thing it says about itself.
+  if (command === "register") {
+    const alias = option(args, "--alias");
+    if (!alias) throw new Error("usage: register --alias <name> [--replace]");
+    const { controlCall } = await import("./core/control.mjs");
+    return controlCall("peer_register", { alias, ...(args.includes("--replace") ? { replace: true } : {}) });
+  }
+  if (command === "unregister") {
+    const alias = option(args, "--alias");
+    if (!alias) throw new Error("usage: unregister --alias <name>");
+    const { controlCall } = await import("./core/control.mjs");
+    return controlCall("peer_unregister", { alias });
+  }
+  if (command === "peers") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_directory", {}); }
+  if (command === "whoami") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_whoami", {}); }
   if (command === "inbox-ack") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_inbox_ack", { messageId: option(args, "--message-id") }); }
   if (command === "link") {
     const { controlCall } = await import("./core/control.mjs");
