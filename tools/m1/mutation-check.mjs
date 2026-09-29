@@ -49,6 +49,12 @@ const MUTANTS = [
   ["env beats file", "src/core/settings.mjs", "    if (fromFile && fromFile[key] !== undefined) { out[key] = { value: fromFile[key], source: \"file\" }; continue; }\n", "", "test/m2/settings.test.mjs"],
   ["broken file falls back to env", "src/core/settings.mjs", "    if (invalid) { out[key] = { value: null, source: \"config_invalid\" }; continue; }\n", "", "test/m2/settings.test.mjs"],
   ["refused frame keeps no digest", "src/core/peer-core.mjs", "if (typeof content === \"string\" && content.length > 0) digest = bodyDigest(content);", "void content;", "test/m0/reply-framing.test.mjs"],
+  // M3
+  ["queue takes a body", "src/extensions/codex-queue/index.mjs", "  if (!match) throw fail(\"INVALID_QUEUE_CALL\");\n  const argv = queueArgv(target.threadId, match[1]);", "  const argv = [\"queue\", \"--thread\", target.threadId, \"--message\", text];", "test/m0/doorbell-contract.test.mjs"],
+  ["version mismatch ignored", "src/extensions/codex-queue/index.mjs", "if (local !== serverVersion) throw fail(\"VERSION_MISMATCH\");", "void local;", "test/m3/codex-wake.test.mjs"],
+  ["running turn gets a new turn", "src/extensions/codex-queue/index.mjs", "params.expectedTurnId = active[0].id; method = \"turn/steer\";", "method = \"turn/start\";", "test/m3/codex-wake.test.mjs"],
+  ["held reported as queued", "src/extensions/codex-queue/index.mjs", "mode: state === \"active\" ? \"held_behind_running_turn\" : \"queued\"", "mode: \"queued\"", "test/m0/held-queue.test.mjs"],
+  ["target keys unchecked", "src/extensions/codex-queue/index.mjs", "    if (Object.keys(entry).some((key) => !TARGET_KEYS.has(key))) throw fail(\"TARGET_UNAVAILABLE\");\n", "", "test/m0/doorbell-contract.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
   ,
   // M4

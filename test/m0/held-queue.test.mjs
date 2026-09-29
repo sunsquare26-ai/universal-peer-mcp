@@ -13,36 +13,31 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CodexWake, codexWakeTools } from "../../src/extensions/codex-queue/index.mjs";
+import { fakeConnect, queueTarget, writeCli, writeTargets } from "./codex-fixture.mjs";
 
 const THREAD = "01a0d249-5457-7f82-8602-b992529eac16";
 
 async function withActiveThread(run) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "upm-m0-held-")));
   try {
-    const cli = path.join(root, "codex-fixture");
-    await fs.writeFile(cli, "#!/usr/bin/env node\nconsole.log('Queued message x for thread '+process.argv[4]+'.');", { mode: 0o700 });
-    await fs.writeFile(path.join(root, "codex-targets.json"), JSON.stringify({ "codex-main": { transport: "cli-queue", cliPath: cli, threadId: THREAD, cwd: root } }), { mode: 0o600 });
+    const cli = await writeCli(root);
+    await writeTargets(root, queueTarget(root, cli));
     // The thread is mid-turn (what app-server thread/read reports as status.type "active").
-    const connect = () => ({
-      call: async (method) => method === "thread/loaded/list" ? { data: [THREAD] }
-        : method === "thread/read" ? { thread: { id: THREAD, cwd: root, status: { type: "active" }, turns: [{ id: "t1", status: "inProgress" }] } } : {},
-      notify() {}, close() {}
-    });
-    await run(new CodexWake({ root, connect }));
+    await run(new CodexWake({ root, connect: fakeConnect({ root, state: "active" }) }));
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 
-test("reproduce: a queue wake into a thread that is mid-turn reports plain 'queued'", () => withActiveThread(async (wake) => {
-  const r = await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID(), body: "x" });
-  expect(r.mode).toBe("queued");
+test("before M3 this reported plain 'queued'; the CLI queue still cannot enter a running turn", () => withActiveThread(async (wake) => {
+  const r = await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() });
+  expect(r.mode).not.toBe("queued");
 }));
 
-test.failing("M1/M3: a queue wake into a mid-turn thread reports held_behind_running_turn", () => withActiveThread(async (wake) => {
-  const r = await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID(), body: "x" });
+test("M1/M3 (passing since M3): a queue wake into a mid-turn thread reports held_behind_running_turn", () => withActiveThread(async (wake) => {
+  const r = await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() });
   expect(r.mode).toBe("held_behind_running_turn");
 }));
 
-test.failing("M1: the public result vocabulary has a held_behind_running_turn state", () => {
+test("M1 (passing since M3): the public result vocabulary has a held_behind_running_turn state", () => {
   const wake = codexWakeTools().find((t) => t.name === "codex_wake");
   expect(wake.outputSchema.properties.mode.enum).toContain("held_behind_running_turn");
 });

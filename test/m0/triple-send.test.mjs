@@ -13,6 +13,7 @@ import path from "node:path";
 import { RUNNING_AVAILABLE, PEER, loadRunning, fixture, frame } from "./running-sut.mjs";
 import { CodexWake } from "../../src/extensions/codex-queue/index.mjs";
 import { checkQueueArgv } from "./contract.mjs";
+import { fakeConnect, queueTarget, writeCli, writeTargets } from "./codex-fixture.mjs";
 
 describe.skipIf(!RUNNING_AVAILABLE)("running SUT: an independent Claude -> daemon message", () => {
   let sut; let f;
@@ -46,12 +47,10 @@ describe.skipIf(!RUNNING_AVAILABLE)("running SUT: an independent Claude -> daemo
 test("M2/M3 (passing since M2): the queue doorbell and the daemon record name the same tool-made id", async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "upm-m0-triple-")));
   try {
-    const cli = path.join(root, "codex-fixture");
-    await fs.writeFile(cli, `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(path.join(root, "argv.json"))},JSON.stringify(process.argv.slice(2)));console.log('Queued message x for thread '+process.argv[4]+'.');`, { mode: 0o700 });
-    const threadId = "01a0d249-5457-7f82-8602-b992529eac16";
-    await fs.writeFile(path.join(root, "codex-targets.json"), JSON.stringify({ "codex-main": { transport: "cli-queue", cliPath: cli, threadId, cwd: root } }), { mode: 0o600 });
+    const cli = await writeCli(root);
+    await writeTargets(root, queueTarget(root, cli));
     const id = crypto.randomUUID();
-    await new CodexWake({ root }).wake({ codexAlias: "codex-main", messageId: id, body: "직원 화면 M1 감수" });
+    await new CodexWake({ root, connect: fakeConnect({ root }) }).wake({ codexAlias: "codex-main", messageId: id });
     expect(checkQueueArgv(JSON.parse(await fs.readFile(path.join(root, "argv.json"), "utf8"))).messageId).toBe(id);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

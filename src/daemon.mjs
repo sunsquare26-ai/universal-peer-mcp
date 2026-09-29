@@ -428,7 +428,8 @@ async function readInbox(args, caller) {
   const who = await identifyCaller(caller);
   if (!who.authenticated) throw Object.assign(new Error(`this process is not a registered peer session (${who.reason}); register first: universal-peer-mcp register --alias <name>`), { code: "SENDER_UNAUTHENTICATED" });
   if (args.recipient !== undefined && args.recipient !== who.alias) { await store.append("peer_inbox_refused", { reason: "not_own_inbox", readerAlias: who.alias, readerPid: caller?.pid }).catch(() => {}); throw Object.assign(new Error(`this session is ${who.alias}; it cannot read another peer's inbox`), { code: "RECIPIENT_MISMATCH" }); }
-  return withInlineBodies({ alias: who.alias, events: inbox(store.events, who.alias, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0, lineage: lineageOf(who) }) }, caller, "peer_inbox");
+  // M3: what the inbox returns is peer content for review, never an owner instruction or approval.
+  return withInlineBodies({ provenance: "peer_content_not_owner_instruction", alias: who.alias, events: inbox(store.events, who.alias, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0, lineage: lineageOf(who) }) }, caller, "peer_inbox");
 }
 async function ackOwnInbox(args, caller) {
   const who = await identifyCaller(caller);
