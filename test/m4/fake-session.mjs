@@ -24,9 +24,11 @@ const bun = process.env.UPM4_BUN || process.execPath;
 let env = { ...process.env };
 let server = null; let files = [];
 
-if (kind === "claude") {
+const base = kind.replace(/-oneshot$/, "");
+if (base === "claude") {
   const [sessionsDir, sessionId, cwd] = rest;
-  delete env.CODEX_THREAD_ID;
+  // A real Claude started from a Codex shell inherits CODEX_THREAD_ID; the one-shot keeps it.
+  if (kind === "claude") delete env.CODEX_THREAD_ID;
   const sockDir = fs.mkdtempSync("/private/tmp/upm4s-"); fs.chmodSync(sockDir, 0o700);
   const socketPath = path.join(sockDir, "s.sock");
   server = net.createServer((s) => s.destroy()); await new Promise((r) => server.listen(socketPath, r)); fs.chmodSync(socketPath, 0o600);
@@ -39,14 +41,22 @@ if (kind === "claude") {
   files = [rowFile, keyFile, sockDir];
   // A /clear inside this same process: new session id, same pid and start time.
   process.on("SIGUSR2", () => { try { const next = JSON.parse(fs.readFileSync(rowFile, "utf8")); next.sessionId = fs.readFileSync(`${rowFile}.next`, "utf8").trim(); fs.writeFileSync(rowFile, JSON.stringify(next), { mode: 0o600 }); process.stdout.write(`${JSON.stringify({ cleared: next.sessionId })}\n`); } catch {} });
-} else if (kind === "codex") {
+} else if (base === "codex") {
   env.CODEX_THREAD_ID = rest[0];
 } else { process.stderr.write("kind must be claude or codex\n"); process.exit(2); }
 
 const running = new Set();
+// One-shot mode for nesting: `<kind>-oneshot <args> -- <next command...>` sets up like <kind>, then
+// runs the next command with this environment, relays its stdout and exits with its code.
+const dash = process.argv.indexOf("--");
 function cleanup() { for (const c of running) { try { c.kill("SIGKILL"); } catch {} } for (const f of files) { try { fs.rmSync(f, { recursive: true, force: true }); } catch {} } }
 process.on("exit", cleanup);
-process.stdout.write(`${JSON.stringify({ ready: process.pid })}\n`);
+if (kind.endsWith("-oneshot")) {
+  const next = process.argv.slice(dash + 1);
+  const child = spawn(next[0], next.slice(1), { env, stdio: ["ignore", "inherit", "inherit"] });
+  child.on("close", (code) => { server?.close(); cleanup(); process.exit(code ?? 1); });
+} else {
+  process.stdout.write(`${JSON.stringify({ ready: process.pid })}\n`);
 
 const rl = readline.createInterface({ input: process.stdin });
 for await (const line of rl) {
@@ -58,4 +68,5 @@ for await (const line of rl) {
   let out = ""; let err = "";
   child.stdout.on("data", (d) => { out += d; }); child.stderr.on("data", (d) => { err += d; });
   child.on("close", (code) => process.stdout.write(`${JSON.stringify({ id: cmd.id, code, stdout: out, stderr: err })}\n`));
+}
 }

@@ -64,3 +64,30 @@ test("named refusals: Codex thread without a rollout file, Claude session withou
   const reasons = (await L.events()).filter((e) => e.type === "peer_register_refused").map((e) => e.reason);
   expect(reasons).toEqual(["codex_thread_unregistered", "permission_mode_unproven"]);
 });
+
+// Nested sessions: the nearer host is the caller. Codex started inside a Claude session's tree is the
+// Codex thread; Claude started from a Codex shell (inheriting CODEX_THREAD_ID) is the Claude session.
+import crypto from "node:crypto";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { uuidv7 } from "./harness.mjs";
+
+async function chain(L, argv) {
+  const child = spawn(argv[0], argv.slice(1), { env: L.env, stdio: ["ignore", "pipe", "inherit"] });
+  let out = ""; child.stdout.on("data", (d) => { out += d; }); await new Promise((r) => child.on("close", r));
+  return JSON.parse(out);
+}
+test("nested sessions: the nearer host names the caller, in both nestings", async () => {
+  const L = await open();
+  const fake = path.join(import.meta.dir, "fake-session.mjs"); const cli = path.resolve(import.meta.dir, "../../src/cli.mjs");
+  const codexBin = path.join(L.base, "bin", "codex");
+  const T1 = uuidv7(); const T2 = uuidv7();
+  await L.codex({ threadId: T1 }); await L.codex({ threadId: T2 });   // rollout files for both threads
+  const claudeArgs = (id) => [process.execPath, fake, "claude-oneshot", L.sessions, id, L.work, "--permission-mode", "bypassPermissions", "--"];
+  // Codex inside Claude: claude → codex host → command
+  const inner = await chain(L, [...claudeArgs(crypto.randomUUID()), codexBin, fake, "codex-oneshot", T1, "--", process.execPath, cli, "whoami"]);
+  expect(inner).toMatchObject({ authenticated: false, kind: "codex", reason: "session_not_allowlisted" });
+  // Claude inside Codex: codex host → claude (inherits CODEX_THREAD_ID) → command
+  const outer = await chain(L, [codexBin, fake, "codex-oneshot", T2, "--", ...claudeArgs(crypto.randomUUID()), process.execPath, cli, "whoami"]);
+  expect(outer).toMatchObject({ authenticated: false, kind: "claude", reason: "session_not_allowlisted" });
+});

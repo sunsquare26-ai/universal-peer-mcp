@@ -83,7 +83,9 @@ const MUTANTS = [
   ["compatibility window on by default", "src/core/settings.mjs", "value: !invalid && fromFile?.[LEGACY_BODIES] === true,", "value: !invalid && fromFile?.[LEGACY_BODIES] !== false,", "test/m4/review-fixes.test.mjs"],
   ["failed post leaves its body file", "src/core/posts.mjs", "    if (spooled.bodyFile) await discardSpooled(", "    if (false) await discardSpooled(", "test/m2/posts.test.mjs"],
   ["orphans deleted, not kept", "src/core/orphans.mjs", "await fsp.rename(file, path.join(target, name));", "await fsp.unlink(file);", "test/m4/review-fixes.test.mjs"],
-  ["referenced bodies swept", "src/core/orphans.mjs", "if (!NAME.test(name) || referenced.has(`${INBOUND_DIRNAME}/${name}`)) continue;", "if (!NAME.test(name)) continue;", "test/m4/review-fixes.test.mjs"]
+  ["referenced bodies swept", "src/core/orphans.mjs", "if (!NAME.test(name) || referenced.has(`${INBOUND_DIRNAME}/${name}`)) continue;", "if (!NAME.test(name)) continue;", "test/m4/review-fixes.test.mjs"],
+  ["nesting decided by the variable, not the host", "src/daemon.mjs", "codex.hostDepth < claude.depth", "codex.depth < claude.depth", "test/m4/registration.test.mjs"],
+  ["Claude always wins a nesting", "src/daemon.mjs", "if (codex.proven && (!Number.isInteger(claude.depth) || codex.hostDepth < claude.depth)) return codexCaller(codex);", "", "test/m4/registration.test.mjs"]
 ];
 
 const root = process.cwd();

@@ -323,6 +323,12 @@ async function post(args, caller) {
 // the thread variable and is still the Claude session; Codex only when no Claude row is found.
 async function identifyCaller(caller) {
   const claude = await resolveSender({ pid: caller?.pid, procStart: caller?.procStart }, { walk: true });
+  // Nested sessions: whichever host is nearer the caller is the caller's session. The Codex host's
+  // depth is compared, not the depth of the variable: a Claude session started from a Codex shell
+  // inherits CODEX_THREAD_ID into every command it runs, and is still the Claude session; a Codex
+  // host started inside a Claude session's tree is the Codex thread.
+  const codex = resolveCodex(caller?.pid);
+  if (codex.proven && (!Number.isInteger(claude.depth) || codex.hostDepth < claude.depth)) return codexCaller(codex);
   if (claude.authenticated) return { authenticated: true, kind: "claude", alias: claude.alias, sessionId: claude.sessionId, pid: claude.pid, procStart: claude.procStart, cwd: claude.cwd };
   if (claude.reason === "session_not_allowlisted") {
     const rebound = await rebindCaller(claude);
@@ -330,8 +336,10 @@ async function identifyCaller(caller) {
     return { authenticated: false, kind: "claude", reason: claude.reason, ...(claude.rebind ? { rebind: claude.rebind } : {}), sessionId: claude.sessionId, pid: claude.pid, procStart: claude.procStart, cwd: claude.cwd };
   }
   if (claude.reason !== "no_session_row") return { authenticated: false, kind: "claude", reason: claude.reason };
-  const codex = resolveCodex(caller?.pid);
   if (!codex.proven) return codex.reason === "no_codex_thread" ? { authenticated: false, kind: null, reason: "no_session" } : { authenticated: false, kind: "codex", reason: codex.reason };
+  return codexCaller(codex);
+}
+function codexCaller(codex) {
   const alias = aliasOfCodexThread(codexPeers, codex.threadId);
   if (!alias) return { authenticated: false, kind: "codex", reason: "session_not_allowlisted", threadId: codex.threadId };
   return { authenticated: true, kind: "codex", alias, threadId: codex.threadId, pid: codex.carrierPid, procStart: codex.carrierProcStart };

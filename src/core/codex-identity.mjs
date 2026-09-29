@@ -48,7 +48,7 @@ export function threadHasRollout(codexHome, threadId, { maxDays = 4000 } = {}) {
 
 export function createCodexResolver({ codexHome = defaultCodexHome(), imageReader = readProcessImage, parentReader = processParent, startReader = processStart, rollout = threadHasRollout, maxDepth = MAX_CODEX_DEPTH } = {}) {
   return function resolveCodexThread(pid) {
-    let current = pid; let threadId = null; let carrier = null; let carrierDepth = null; let hostSeen = false; const seen = new Set();
+    let current = pid; let threadId = null; let carrier = null; let carrierDepth = null; let hostSeen = false; let hostDepth = null; const seen = new Set();
     for (let depth = 0; depth <= maxDepth; depth += 1) {
       if (!Number.isInteger(current) || current <= 1 || seen.has(current)) break;
       seen.add(current);
@@ -59,7 +59,7 @@ export function createCodexResolver({ codexHome = defaultCodexHome(), imageReade
           if (!THREAD.test(value)) return { proven: false, reason: "codex_thread_malformed" };
           threadId = value; carrier = current; carrierDepth = depth;
         }
-        if (threadId !== null && path.basename(image.executable ?? "") === "codex") { hostSeen = true; break; }
+        if (threadId !== null && path.basename(image.executable ?? "") === "codex") { hostSeen = true; hostDepth = depth; break; }
       }
       try { current = parentReader(current); } catch { break; }
     }
@@ -69,6 +69,6 @@ export function createCodexResolver({ codexHome = defaultCodexHome(), imageReade
     if (!rollout(codexHome, threadId)) return { proven: false, reason: "codex_thread_unregistered", threadId };
     let after = null; try { after = normalizeProcStart(startReader(carrier)); } catch {}
     if (before === null || before !== after) return { proven: false, reason: "process_identity_changed", threadId };
-    return { proven: true, threadId, carrierPid: carrier, carrierProcStart: before, depth: carrierDepth };
+    return { proven: true, threadId, carrierPid: carrier, carrierProcStart: before, depth: carrierDepth, hostDepth };
   };
 }
