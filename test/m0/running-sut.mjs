@@ -1,14 +1,15 @@
-// The code that is actually running (daemon pid 1624 since 2026-09-26) is an in-place patched
-// install that is in no git repository. The M0 reproductions import it read-only from there, so
-// they describe today's behaviour and not origin/main's. Override with UP_RUNNING_SRC.
+// The code that is actually running (daemon pid 1624 since 2026-09-26) is imported into this
+// tree unchanged (commit "Import the running install exactly as it is"). The reproductions run
+// against this tree by default. UP_RUNNING_SRC points them at another copy, e.g. the live install,
+// to confirm the tree and the install still behave the same.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import fsp from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
-export const RUNNING_SRC = process.env.UP_RUNNING_SRC
-  ?? path.join(os.homedir(), "friday-mini/var/tools/universal-peer-mcp/0.1.0-r1/codex/lib/node_modules/universal-peer-mcp/src");
+export const RUNNING_SRC = process.env.UP_RUNNING_SRC ?? fileURLToPath(new URL("../../src", import.meta.url));
 export const RUNNING_AVAILABLE = fs.existsSync(path.join(RUNNING_SRC, "core/inbound-spool.mjs"));
 
 export const THREAD = "9f9f218b-7474-40df-a166-e37d9bcf1a84";

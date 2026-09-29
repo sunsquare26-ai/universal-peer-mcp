@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { CodexWake, codexWakeTools } from "../../src/extensions/codex-wake/index.mjs";
+import { CodexWake, codexWakeTools } from "../../src/extensions/codex-queue/index.mjs";
 
 const THREAD = "01a0d249-5457-7f82-8602-b992529eac16";
 

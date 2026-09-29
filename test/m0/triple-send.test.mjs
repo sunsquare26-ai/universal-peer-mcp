@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { RUNNING_AVAILABLE, PEER, loadRunning, fixture, frame } from "./running-sut.mjs";
-import { CodexWake } from "../../src/extensions/codex-wake/index.mjs";
+import { CodexWake } from "../../src/extensions/codex-queue/index.mjs";
 import { checkQueueArgv } from "./contract.mjs";
 
 describe.skipIf(!RUNNING_AVAILABLE)("running SUT: an independent Claude -> daemon message", () => {
