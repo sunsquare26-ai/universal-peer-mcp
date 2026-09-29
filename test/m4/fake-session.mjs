@@ -31,7 +31,8 @@ if (base === "claude") {
   if (kind === "claude") delete env.CODEX_THREAD_ID;
   const sockDir = fs.mkdtempSync("/private/tmp/upm4s-"); fs.chmodSync(sockDir, 0o700);
   const socketPath = path.join(sockDir, "s.sock");
-  server = net.createServer((s) => s.destroy()); await new Promise((r) => server.listen(socketPath, r)); fs.chmodSync(socketPath, 0o600);
+  // M3: record what arrives on the session socket (the Claude doorbell is one fixed line).
+  server = net.createServer((s) => { s.on("data", (d) => { try { fs.appendFileSync(path.join(sockDir, "frames"), d); } catch {} }); s.on("error", () => {}); s.setTimeout(1500, () => s.destroy()); }); await new Promise((r) => server.listen(socketPath, r)); fs.chmodSync(socketPath, 0o600);
   const procStart = processStart(process.pid);
   const row = { pid: process.pid, sessionId, cwd, startedAt: Date.now(), procStart, version: "test", peerProtocol: 1, peerFeatures: ["notify_idle", "reply_across_default_dirs"], kind: "interactive", entrypoint: "cli", messagingSocketPath: socketPath, name: `double-${sessionId.slice(0, 8)}`, status: "idle" };
   const rowFile = path.join(sessionsDir, `${process.pid}.json`);

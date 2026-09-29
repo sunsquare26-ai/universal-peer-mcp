@@ -58,13 +58,15 @@ const MUTANTS = [
   // M3 product wiring
   ["ring without an intent first", "src/core/doorbell-service.mjs", "      if (first) {\n        try { await this.store.appendChecked(\"doorbell_intent\"", "      if (false) {\n        try { await this.store.appendChecked(\"doorbell_intent\"", "test/m3/doorbell-e2e.test.mjs"],
   ["shared current target", "src/core/doorbell-service.mjs", "const result = await this.wake.wake({ codexAlias: post.recipient, messageId: post.messageId, target: this.targetFor(post) });", "this.current = post; await null; const result = await this.wake.wake({ codexAlias: post.recipient, messageId: post.messageId, target: this.targetFor(this.current) });", "test/m3/doorbell-service.test.mjs"],
-  ["moved alias still rung", "src/core/doorbell-service.mjs", "if (!bound || !sameUuid(bound, post.recipientThreadId)) return \"WAKE_TARGET_MISMATCH\";", "", "test/m3/doorbell-service.test.mjs"],
-  ["wake not authorized", "src/extensions/codex-queue/index.mjs", "if (this.authorize) { const verdict", "if (false) { const verdict", "test/m3/doorbell-service.test.mjs"],
+    ["wake not authorized", "src/extensions/codex-queue/index.mjs", "if (this.authorize) { const verdict", "if (false) { const verdict", "test/m3/doorbell-service.test.mjs"],
   ["retried more than once", "src/core/doorbell-service.mjs", "if (this.store.events.some((e) => e.type === \"doorbell_retry\" && sameUuid(e.messageId, post.messageId))) { report.exhausted", "if (false) { report.exhausted", "test/m3/doorbell-service.test.mjs"],
   ["alarm on every sweep", "src/core/doorbell-service.mjs", "      if (this.store.events.some((e) => e.type === \"doorbell_alerted\" && sameUuid(e.messageId, post.messageId))) continue;\n", "", "test/m3/doorbell-service.test.mjs"],
   ["sweep skips a missing intent", "src/core/doorbell-service.mjs", "if (!intent) { report.intentsCreated += 1; await this.ring(post.messageId, { first: true }); continue; }", "if (!intent) continue;", "test/m3/doorbell-service.test.mjs"],
   ["hook failure swallowed", "src/core/events.mjs", "try { this.onAppendFailed?.(event, error); } catch {}", "void error;", "test/m3/doorbell-service.test.mjs"],
   ["daemon never rings", "src/daemon.mjs", "store.onAppend = (row) => doorbell.onAppend(row);", "", "test/m3/doorbell-e2e.test.mjs"],
+  ["Claude doorbell id not derived", "src/core/doorbell-service.mjs", "messageId: uuidv5(`doorbell:${post.messageId}`)", "messageId: crypto.randomUUID()", "test/m3/doorbell-service.test.mjs"],
+  ["Claude doorbell ignores a moved alias", "src/core/doorbell-service.mjs", "if (!current || !sameUuid(current, bound)) return \"WAKE_TARGET_MISMATCH\";", "", "test/m3/doorbell-service.test.mjs"],
+  ["no doorbell for Claude", "src/core/doorbell-service.mjs", "      if (post.recipientKind === \"claude\") return this.#ringClaude(post);\n", "", "test/m3/doorbell-e2e.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
   ,
   // M4

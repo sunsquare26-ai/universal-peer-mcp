@@ -54,9 +54,35 @@ test("a running turn is steered", async () => {
   expect(s.calls.find(([m]) => m === "turn/steer")[1]).toMatchObject({ expectedTurnId: "turn-1", threadId: T1 });
 });
 
-test("posts to Claude peers get no doorbell", async () => {
-  const s = await stand(); const row = await s.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "test-claude-1", recipientKind: "claude", recipientSessionId: crypto.randomUUID() });
-  await s.service.onAppend(row); expect(s.rows("doorbell_intent")).toEqual([]);
+test("a post to a Claude peer: one fixed line through the session socket, derived id, outcome sent; a retry is a replay", async () => {
+  const S1 = crypto.randomUUID(); const sends = [];
+  const s = await stand();
+  s.service.claudePeers = () => ({ "test-claude-1": { sessionId: S1 } });
+  s.service.sendClaude = async (args) => { sends.push(args); return { replay: sends.length > 1 }; };
+  const row = await s.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "test-claude-1", recipientKind: "claude", recipientSessionId: S1 });
+  await s.service.onAppend(row);
+  expect(sends).toHaveLength(1);
+  expect(sends[0]).toMatchObject({ alias: "test-claude-1", threadId: row.messageId, line: bell(row.messageId) });
+  expect(sends[0].messageId).not.toBe(row.messageId);
+  expect(s.rows("doorbell_outcome")[0]).toMatchObject({ state: "sent", mode: "session_socket", recipientKind: "claude", threadId: S1 });
+  // The same derived id on a retry: PeerCore answers it as a replay, nothing is written twice.
+  const again = await s.service.ring(row.messageId, { retry: true });
+  expect(sends[1].messageId).toBe(sends[0].messageId); expect(again).toMatchObject({ state: "sent", replay: true });
+});
+
+test("Claude: the alias moved to another session after the post -> wake_target_mismatch; an uncertain write -> unknown", async () => {
+  const S1 = crypto.randomUUID(); const S2 = crypto.randomUUID(); const sends = [];
+  const s = await stand(); const table = { "test-claude-1": { sessionId: S1 } };
+  s.service.claudePeers = () => table;
+  s.service.sendClaude = async (args) => { sends.push(args); throw Object.assign(new Error("x"), { code: "DELIVERY_UNCERTAIN" }); };
+  const old = await s.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "test-claude-1", recipientKind: "claude", recipientSessionId: S1 });
+  table["test-claude-1"] = { sessionId: S2 };
+  await s.service.ring(old.messageId, { first: true });
+  expect(s.rows("doorbell_outcome")[0]).toMatchObject({ state: "not_sent", reason: "wake_target_mismatch", boundThreadId: S2 });
+  const fresh = await s.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "test-claude-1", recipientKind: "claude", recipientSessionId: S2 });
+  await s.service.ring(fresh.messageId, { first: true });
+  expect(s.rows("doorbell_outcome")[1]).toMatchObject({ state: "unknown", errorCode: "DELIVERY_UNCERTAIN" });
+  expect(sends).toHaveLength(1);
 });
 
 test("wake is refused for an unknown id, someone else's id, and a processed id", async () => {

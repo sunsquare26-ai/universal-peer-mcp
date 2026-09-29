@@ -1,6 +1,7 @@
 import { CodexWake, cliVersion as readCliVersion, enqueueCodex } from "../extensions/codex-queue/index.mjs";
 import { doorbell } from "./doorbell.mjs";
 import { sameUuid } from "./limits.mjs";
+import { uuidv5 } from "./posts.mjs";
 
 // The product path of the doorbell (M3). A post accepted for a Codex peer gets one durable intent
 // and one ring:
@@ -23,8 +24,11 @@ export const UNKNOWN_ALERT_AFTER_MS = 30 * 60 * 1000;
 const code = (error) => (typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "WAKE_FAILED");
 
 export class DoorbellService {
-  constructor({ store, root, settings, codexPeers, alerts = null, wake = null, enqueue = enqueueCodex, cliVersion = readCliVersion, now = () => Date.now() }) {
-    this.store = store; this.settings = settings; this.codexPeers = codexPeers; this.alerts = alerts; this.now = now; this.enqueue = enqueue; this.cliVersion = cliVersion;
+  // Claude recipients (M3, second half): `claudePeers()` is the target table (alias -> sessionId) and
+  // `sendClaude({ alias, messageId, threadId, line })` writes one fixed line into that session through
+  // the native injection path (PeerCore.send with a privileged wire body).
+  constructor({ store, root, settings, codexPeers, claudePeers = () => ({}), sendClaude = null, alerts = null, wake = null, enqueue = enqueueCodex, cliVersion = readCliVersion, now = () => Date.now() }) {
+    this.store = store; this.settings = settings; this.codexPeers = codexPeers; this.claudePeers = claudePeers; this.sendClaude = sendClaude; this.alerts = alerts; this.now = now; this.enqueue = enqueue; this.cliVersion = cliVersion;
     this.running = new Map();
     // No shared "current target": every ring passes its own immutable target (review [상]).
     this.wake = wake ?? new CodexWake({ root, authorize: (alias, messageId) => this.authorize(alias, messageId) });
@@ -40,21 +44,24 @@ export class DoorbellService {
     return { transport: "existing-app-server", cliPath: this.settings.codexCli.value, socketPath: this.settings.codexAppServerSocket.value, threadId: post.recipientThreadId, ...(this.settings.codexVersion?.value ? { codexVersion: this.settings.codexVersion.value } : {}) };
   }
 
-  // Only a message in the daemon inbox, delivered to this alias and thread, not yet processed, and
-  // whose alias still names that thread.
+  // Only a message in the daemon inbox, delivered to this alias and session/thread, not yet
+  // processed, and whose alias still names that session/thread.
   authorize(alias, messageId) {
     const post = this.post(messageId);
     if (!post) return "WAKE_UNKNOWN_MESSAGE";
-    if (post.recipient !== alias || post.recipientKind !== "codex" || typeof post.recipientThreadId !== "string") return "WAKE_NOT_RECIPIENT";
+    const codex = post.recipientKind === "codex";
+    const bound = codex ? post.recipientThreadId : post.recipientSessionId;
+    if (post.recipient !== alias || !["codex", "claude"].includes(post.recipientKind) || typeof bound !== "string") return "WAKE_NOT_RECIPIENT";
     if (this.processed(messageId)) return "WAKE_ALREADY_PROCESSED";
-    const bound = this.codexPeers()?.[alias]?.threadId;
-    if (!bound || !sameUuid(bound, post.recipientThreadId)) return "WAKE_TARGET_MISMATCH";
+    const current = codex ? this.codexPeers()?.[alias]?.threadId : this.claudePeers()?.[alias]?.sessionId;
+    if (!current || !sameUuid(current, bound)) return "WAKE_TARGET_MISMATCH";
     return true;
   }
+  bindingOf(post) { return post.recipientKind === "codex" ? post.recipientThreadId : post.recipientSessionId; }
 
   // Called for every appended row; acts on accepted posts for Codex peers.
   async onAppend(row) {
-    if (row?.type !== "peer_post" || row.recipientKind !== "codex") return;
+    if (row?.type !== "peer_post" || !["codex", "claude"].includes(row.recipientKind)) return;
     await this.ring(row.messageId, { first: true });
   }
 
@@ -62,14 +69,15 @@ export class DoorbellService {
     if (this.running.has(messageId)) return this.running.get(messageId);
     const job = (async () => {
       const post = this.post(messageId);
-      if (!post || post.recipientKind !== "codex") return { state: "not_applicable" };
+      if (!post || !["codex", "claude"].includes(post.recipientKind)) return { state: "not_applicable" };
       if (first) {
-        try { await this.store.appendChecked("doorbell_intent", { messageId: post.messageId, recipient: post.recipient, threadId: post.recipientThreadId }, (events) => (events.some((e) => e.type === "doorbell_intent" && sameUuid(e.messageId, messageId)) ? Object.assign(new Error("dup"), { code: "DUP" }) : null)); }
+        try { await this.store.appendChecked("doorbell_intent", { messageId: post.messageId, recipient: post.recipient, recipientKind: post.recipientKind, threadId: this.bindingOf(post) }, (events) => (events.some((e) => e.type === "doorbell_intent" && sameUuid(e.messageId, messageId)) ? Object.assign(new Error("dup"), { code: "DUP" }) : null)); }
         catch (error) { if (error.code !== "DUP") throw error; return { state: "duplicate_intent" }; }
       }
       if (retry) await this.store.append("doorbell_retry", { messageId: post.messageId });
       const verdict = this.authorize(post.recipient, post.messageId);
-      if (verdict !== true) return this.#record(post, "not_sent", { errorCode: verdict, ...(verdict === "WAKE_TARGET_MISMATCH" ? { reason: "wake_target_mismatch", boundThreadId: this.codexPeers()?.[post.recipient]?.threadId ?? null } : {}) });
+      if (verdict !== true) return this.#record(post, "not_sent", { errorCode: verdict, ...(verdict === "WAKE_TARGET_MISMATCH" ? { reason: "wake_target_mismatch", boundThreadId: (post.recipientKind === "codex" ? this.codexPeers()?.[post.recipient]?.threadId : this.claudePeers()?.[post.recipient]?.sessionId) ?? null } : {}) });
+      if (post.recipientKind === "claude") return this.#ringClaude(post);
       if (!this.configured()) return this.#record(post, "not_sent", { errorCode: "DOORBELL_NOT_CONFIGURED" });
       try {
         const result = await this.wake.wake({ codexAlias: post.recipient, messageId: post.messageId, target: this.targetFor(post) });
@@ -86,6 +94,20 @@ export class DoorbellService {
     try { return await job; } finally { this.running.delete(messageId); }
   }
 
+  // Claude: one fixed line through the native session socket (the path peer_send uses), under an id
+  // derived from the post id so a retry after a restart is a replay, never a second write. The
+  // socket write is `sent`; that the session read it is proven only by its own inbox-ack.
+  async #ringClaude(post) {
+    if (typeof this.sendClaude !== "function") return this.#record(post, "not_sent", { errorCode: "DOORBELL_NOT_CONFIGURED" });
+    try {
+      const result = await this.sendClaude({ alias: post.recipient, messageId: uuidv5(`doorbell:${post.messageId}`), threadId: post.messageId, line: doorbell(post.messageId) });
+      return this.#record(post, "sent", { mode: "session_socket", ...(result?.replay ? { replay: true } : {}) });
+    } catch (error) {
+      const c = code(error);
+      return this.#record(post, c === "DELIVERY_UNCERTAIN" ? "unknown" : "not_sent", { errorCode: c });
+    }
+  }
+
   // The app-server could not say whether the thread is idle or running: the doorbell goes into the
   // CLI queue, which delivers when any running turn ends — so it is recorded as held, never as sent.
   // The release check still applies: without a server to ask, the CLI must match the pinned release.
@@ -100,7 +122,7 @@ export class DoorbellService {
   }
 
   async #record(post, state, extra = {}) {
-    const row = await this.store.append("doorbell_outcome", { messageId: post.messageId, recipient: post.recipient, threadId: post.recipientThreadId, state, ...extra });
+    const row = await this.store.append("doorbell_outcome", { messageId: post.messageId, recipient: post.recipient, recipientKind: post.recipientKind, threadId: this.bindingOf(post), state, ...extra });
     return { state, seq: row.seq, ...extra };
   }
 
@@ -112,7 +134,7 @@ export class DoorbellService {
   //       Never retried automatically: the cause (settings, release, host) is fixed by hand.
   async sweep() {
     const report = { intentsCreated: 0, retried: 0, exhausted: 0, alerted: 0 };
-    for (const post of this.store.events.filter((e) => e.type === "peer_post" && e.recipientKind === "codex")) {
+    for (const post of this.store.events.filter((e) => e.type === "peer_post" && ["codex", "claude"].includes(e.recipientKind))) {
       if (this.processed(post.messageId) || this.running.has(post.messageId)) continue;
       const intent = this.intent(post.messageId); const outcome = this.outcome(post.messageId);
       if (!intent) { report.intentsCreated += 1; await this.ring(post.messageId, { first: true }); continue; }

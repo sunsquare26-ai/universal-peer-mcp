@@ -9,7 +9,7 @@ import net from "node:net";
 import { EventStore } from "./core/events.mjs";
 import { hydrateInboundBodies } from "./core/inbound-hydrate.mjs";
 import { InboundSpool } from "./core/inbound-spool.mjs";
-import { frameObserver, PeerCore } from "./core/peer-core.mjs";
+import { frameObserver, milestoneSendOptions, PeerCore } from "./core/peer-core.mjs";
 import { TargetTableWatch } from "./core/target-table.mjs";
 import { createSessionRebinder } from "./core/session-rebind.mjs";
 import { atomicPrivateWrite, ensurePrivateDirectory, statePaths } from "./core/state-paths.mjs";
@@ -154,7 +154,9 @@ const resolveCodex = createCodexResolver();
 // M3: the doorbell for posts delivered to Codex peers (src/core/doorbell-service.mjs). Every accepted
 // post for a Codex peer gets a durable intent and one ring; intents left open by a restart are rung
 // once more; unknown outcomes older than 30 minutes raise one alarm and are never resent.
-const doorbell = new DoorbellService({ store, root: paths.root, settings, codexPeers: () => codexPeers, alerts });
+const doorbell = new DoorbellService({ store, root: paths.root, settings, codexPeers: () => codexPeers, claudePeers: () => targets, alerts,
+  // The Claude half: the same native path peer_send uses, with the fixed line as the whole wire body.
+  sendClaude: ({ alias, messageId, threadId, line }) => core.send({ alias, messageId, threadId, kind: "doorbell", body: line }, milestoneSendOptions({ wireBody: line })) });
 store.onAppend = (row) => doorbell.onAppend(row);
 store.onAppendFailed = (row, error) => {
   const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "HOOK_FAILED";
@@ -164,7 +166,7 @@ store.onAppendFailed = (row, error) => {
 const sweepDoorbells = () => { doorbell.sweep().catch((error) => { alerts.raise({ kind: "doorbell_hook_failed", key: `doorbell_sweep_failed:${new Date().toISOString().slice(0, 13)}`, code: typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "SWEEP_FAILED" }).catch(() => {}); }); };
 setImmediate(sweepDoorbells);
 setInterval(sweepDoorbells, 5 * 60 * 1000).unref();
-core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, rebind: rebindTarget, senderResolver: (peer) => resolveSender(peer), postRecipientFields: (alias) => recipientFieldsOf(resolvePeer(alias, { claude: targets, codex: codexPeers })) });
+core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, ...(claudeSessionsDir ? { resolverOptions: { sessionsDir: claudeSessionsDir } } : {}), rebind: rebindTarget, senderResolver: (peer) => resolveSender(peer), postRecipientFields: (alias) => recipientFieldsOf(resolvePeer(alias, { claude: targets, codex: codexPeers })) });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
 if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });
 const token = crypto.randomBytes(32).toString("hex"); let closing = false;

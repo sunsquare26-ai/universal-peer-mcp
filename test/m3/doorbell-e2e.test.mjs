@@ -90,3 +90,29 @@ test("--replace: the body and the doorbell follow the same binding; the old thre
   expect((await s.turns()).every((t) => t.threadId === x1.threadId)).toBe(true);   // never at x1 for the new message
   expect((await s.turns()).filter((t) => t.text.endsWith(late))).toHaveLength(0);
 });
+
+test("Codex post -> Claude doorbell (fixed line on the session socket) -> Claude inbox -> post --reply-to -> Codex doorbell -> Codex inbox", async () => {
+  const L = await lane(); lanes.push(L);
+  const x = await L.codex(); const s = await stub(L, x.threadId); await configure(L, s.sock);
+  const a = await L.claude();
+  await a.run(["register", "--alias", "test-claude-1"]); await x.run(["register", "--alias", "test-codex-1"]);
+  const sent = await x.run(["post", "--to", "test-claude-1", "--body-file", await writeBody(L, "Codex가 묻습니다")]);
+  expect(sent.code).toBe(0);
+  const id = sent.json.results[0].messageId;
+  expect(await waitRow(L, (r) => r.type === "doorbell_outcome" && r.messageId === id)).toMatchObject({ state: "sent", mode: "session_socket", recipientKind: "claude" });
+  const row = JSON.parse(await fs.readFile(path.join(L.sessions, `${a.pid}.json`), "utf8"));
+  const frames = await fs.readFile(path.join(path.dirname(row.messagingSocketPath), "frames"), "utf8");
+  expect(frames).toContain(`PEER_DOORBELL v=1 message_id=${id}`);
+  expect(frames).not.toContain("Codex가 묻습니다");                       // no body on the doorbell path
+  const box = await a.run(["inbox"]);
+  expect(box.json.events.map((e) => e.messageId)).toEqual([id]);
+  const reply = await a.run(["post", "--reply-to", id, "--body-file", await writeBody(L, "Claude가 답합니다")]);
+  expect(reply.code).toBe(0);
+  const replyId = reply.json.results[0].messageId;
+  expect((await a.run(["inbox-ack", "--message-id", id])).json).toMatchObject({ processed: true });
+  expect(await waitRow(L, (r) => r.type === "doorbell_outcome" && r.messageId === replyId)).toMatchObject({ state: "sent", recipientKind: "codex", threadId: x.threadId });
+  expect((await s.turns()).map((t) => t.text)).toContain(`PEER_DOORBELL v=1 message_id=${replyId}`);
+  const cbox = await x.run(["inbox"]);
+  expect(cbox.json.events.map((e) => e.messageId)).toEqual([replyId]);
+  expect((await x.run(["inbox-ack", "--message-id", replyId])).json).toMatchObject({ processed: true });
+});
