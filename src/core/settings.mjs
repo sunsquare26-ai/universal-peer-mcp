@@ -17,14 +17,16 @@ import { assertPrivateFile } from "./state-paths.mjs";
 export const SETTINGS_FILENAME = "config.json";
 // M3 doorbell: the Codex CLI and the app-server socket the doorbell goes through, and the release
 // both must be (the queue fallback, which cannot ask the server, compares against this pin).
-const KEYS = { alertCommand: "UNIVERSAL_PEER_ALERT_COMMAND", archiveBackup: "UNIVERSAL_PEER_ARCHIVE_BACKUP", codexCli: "UNIVERSAL_PEER_CODEX_CLI", codexAppServerSocket: "UNIVERSAL_PEER_CODEX_APP_SERVER_SOCKET", codexVersion: "UNIVERSAL_PEER_CODEX_VERSION" };
+const KEYS = { alertCommand: "UNIVERSAL_PEER_ALERT_COMMAND", archiveBackup: "UNIVERSAL_PEER_ARCHIVE_BACKUP", codexCli: "UNIVERSAL_PEER_CODEX_CLI", codexAppServerSocket: "UNIVERSAL_PEER_CODEX_APP_SERVER_SOCKET", codexVersion: "UNIVERSAL_PEER_CODEX_VERSION", codexReleasesDir: "UNIVERSAL_PEER_CODEX_RELEASES_DIR", codexSocketDir: "UNIVERSAL_PEER_CODEX_SOCKET_DIR" };
 const REMOTE = /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:\/[A-Za-z0-9._/-]*$/;
 const valid = {
   alertCommand: (v) => typeof v === "string" && path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v),
   archiveBackup: (v) => typeof v === "string" && (REMOTE.test(v) || (path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v))),
   codexCli: (v) => typeof v === "string" && path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v),
   codexAppServerSocket: (v) => typeof v === "string" && path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v),
-  codexVersion: (v) => typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v)
+  codexVersion: (v) => typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v),
+  codexReleasesDir: (v) => typeof v === "string" && path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v),
+  codexSocketDir: (v) => typeof v === "string" && path.isAbsolute(v) && !/[\s'"`$;&|<>]/.test(v)
 };
 
 export async function loadSettings({ root, env = process.env }) {

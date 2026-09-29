@@ -22,7 +22,9 @@ async function stub(L, threadId, state = "idle") {
 }
 async function configure(L, sock) {
   const cli = await writeCli(L.base, { version: "0.159.0" });
-  await fs.writeFile(path.join(L.root, "config.json"), JSON.stringify({ codexCli: cli, codexAppServerSocket: sock, codexVersion: "0.159.0" }), { mode: 0o600 });
+  // Releases and socket directories inside the lane: a test daemon never looks at the live ones.
+  await fs.mkdir(path.join(L.base, "releases"), { mode: 0o700 }).catch(() => {}); await fs.mkdir(path.join(L.base, "sockets"), { mode: 0o700 }).catch(() => {});
+  await fs.writeFile(path.join(L.root, "config.json"), JSON.stringify({ codexCli: cli, codexAppServerSocket: sock, codexVersion: "0.159.0", codexReleasesDir: path.join(L.base, "releases"), codexSocketDir: path.join(L.base, "sockets") }), { mode: 0o600 });
 }
 const waitRow = async (L, pred, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { const hit = (await L.events()).find(pred); if (hit) return hit; await Bun.sleep(50); } return null; };
 
@@ -132,7 +134,8 @@ test("a queued doorbell that arrives after the message was acked: recorded as do
   const x = await L.codex(); const a = await L.claude();
   // No app-server socket: the doorbell can only go through the CLI queue (held).
   const cli = await writeCli(L.base, { version: "0.159.0" });
-  await fs.writeFile(path.join(L.root, "config.json"), JSON.stringify({ codexCli: cli, codexAppServerSocket: path.join(L.base, "missing.sock"), codexVersion: "0.159.0" }), { mode: 0o600 });
+  await fs.mkdir(path.join(L.base, "sockets"), { mode: 0o700 });
+  await fs.writeFile(path.join(L.root, "config.json"), JSON.stringify({ codexCli: cli, codexAppServerSocket: path.join(L.base, "missing.sock"), codexVersion: "0.159.0", codexReleasesDir: path.join(L.base, "releases"), codexSocketDir: path.join(L.base, "sockets") }), { mode: 0o600 });
   await a.run(["register", "--alias", "test-claude-1"]); await x.run(["register", "--alias", "test-codex-1"]);
   const id = (await a.run(["post", "--to", "test-codex-1", "--body-file", await writeBody(L, "queued")])).json.results[0].messageId;
   expect(await waitRow(L, (r) => r.type === "doorbell_outcome" && r.messageId === id)).toMatchObject({ state: "held", via: "queue" });

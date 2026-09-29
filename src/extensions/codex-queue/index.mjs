@@ -77,7 +77,7 @@ export class CodexWake {
   // daemon builds it from the peer directory and its settings. `authorize(alias, messageId, entry)`
   // (optional) is asked before anything is reserved or sent; the daemon uses it to allow only a
   // message that is in its inbox for that alias and thread and not yet processed.
-  constructor({ root, connect = connectAppServer, enqueue = enqueueCodex, cliVersion: readCliVersion = cliVersion, targets = null, authorize = null }) { this.root = root; this.connect = connect; this.enqueue = enqueue; this.cliVersion = readCliVersion; this.targets = targets; this.authorize = authorize; }
+  constructor({ root, connect = connectAppServer, enqueue = enqueueCodex, cliVersion: readCliVersion = cliVersion, targets = null, authorize = null, cliFor = null, sockets = null }) { this.root = root; this.connect = connect; this.enqueue = enqueue; this.cliVersion = readCliVersion; this.targets = targets; this.authorize = authorize; this.cliFor = cliFor; this.sockets = sockets; }
   // `given`: an entry supplied by the caller for this one call (immutable; the daemon passes the
   // thread of the post being rung). Validated exactly like one read from a file.
   async target(alias, given = null) {
@@ -116,15 +116,35 @@ export class CodexWake {
     if (!stat.isSocket() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) throw fail("TARGET_UNAVAILABLE");
     return entry;
   }
+  // Which app-server holds the thread: the target's socket first, then any other socket the caller
+  // offers (`sockets()`, e.g. every private socket under the Codex daemon directory). The thread must
+  // be in that server's loaded list; nothing is ever loaded into a server.
   async inspect(alias, action, given = null) {
-    const target = await this.target(alias, given); const rpc = this.connect(target.socketPath);
+    const target = await this.target(alias, given);
+    const candidates = [target.socketPath, ...((await this.sockets?.()) ?? [])].filter((p, i, a) => typeof p === "string" && a.indexOf(p) === i);
+    let lastError = fail("TARGET_UNAVAILABLE");
+    for (const socketPath of candidates) {
+      try { return await this.#inspectOn({ ...target, socketPath }, action); }
+      catch (error) { if (error?.code !== "THREAD_NOT_HERE") throw error; lastError = fail("TARGET_UNAVAILABLE"); }
+    }
+    throw lastError;
+  }
+
+  async #inspectOn(target, action) {
+    const rpc = this.connect(target.socketPath);
     try {
       const init = await rpc.call("initialize", { clientInfo: { name: "universal-peer-mcp", version: "0.1.0" }, capabilities: { experimentalApi: true } });
       const serverVersion = versionOf(init?.userAgent);
       if (!serverVersion) throw fail("VERSION_UNKNOWN");
-      if (target.codexVersion && target.codexVersion !== serverVersion) throw fail("VERSION_MISMATCH");
-      // The CLI that queues or proxies and the app-server that owns the thread: one release.
-      if ((await this.cliVersion(target.cliPath)) !== serverVersion) throw fail("VERSION_MISMATCH");
+      // The release follows the server (it updates itself): the CLI used with it is chosen now, for
+      // the version the server just reported — the configured one if it matches, otherwise the one
+      // `cliFor(version)` finds (e.g. the daemon's own releases directory). No match: not sent.
+      let cliPath = target.cliPath;
+      if ((await this.cliVersion(cliPath).catch(() => null)) !== serverVersion) {
+        cliPath = (await this.cliFor?.(serverVersion)) ?? null;
+        if (!cliPath || (await this.cliVersion(cliPath).catch(() => null)) !== serverVersion) throw fail("VERSION_MISMATCH");
+      }
+      target = { ...target, cliPath };
       rpc.notify("initialized");
       // thread/read alone can read a persisted but unloaded thread. Never load it
       // into a different server: verify ownership in this server's loaded list.
@@ -134,7 +154,7 @@ export class CodexWake {
         if (result.data?.includes(target.threadId)) { loaded = true; break; }
         cursor = result.nextCursor; if (!cursor) break;
       }
-      if (!loaded) throw fail("TARGET_UNAVAILABLE");
+      if (!loaded) throw fail("THREAD_NOT_HERE");
       // Metadata only. `includeTurns: true` hydrates the whole rollout: 38,490,010 bytes for the live
       // codex-main thread (386 turns, measured 2026-09-29 23:3x KST), past the transport's 8 MiB frame
       // bound, so the socket closed ("Max payload size exceeded") and every running-turn doorbell fell

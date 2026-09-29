@@ -2,6 +2,26 @@ import { CodexWake, cliVersion as readCliVersion, enqueueCodex } from "../extens
 import { doorbell } from "./doorbell.mjs";
 import { sameUuid } from "./limits.mjs";
 import { uuidv5 } from "./posts.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// Where the Codex app-server daemon keeps its releases and its sockets. It updates itself (measured
+// 2026-09-30 05:58 KST: 0.159.0 -> 0.159.1 under the same socket path), so the CLI is chosen per ring
+// for the version the server reports, and the socket that holds the thread is looked up, not pinned.
+export const DEFAULT_CODEX_RELEASES = path.join(os.homedir(), ".codex", "packages", "app-server-daemon", "releases");
+export const DEFAULT_CODEX_SOCKET_DIR = `/private/tmp/codex-daemon-${process.getuid()}`;
+const privateFile = (p, kind) => { try { const st = fs.lstatSync(p); return !st.isSymbolicLink() && st.uid === process.getuid() && (kind === "socket" ? st.isSocket() && (st.mode & 0o077) === 0 : st.isFile() && (st.mode & 0o022) === 0); } catch { return false; } };
+export function cliForVersion(version, releases = DEFAULT_CODEX_RELEASES) {
+  if (!/^\d+\.\d+\.\d+$/.test(version ?? "")) return null;
+  let names = []; try { names = fs.readdirSync(releases); } catch { return null; }
+  for (const name of names.filter((n) => n.startsWith(`${version}-`)).sort()) { const bin = path.join(releases, name, "bin", "codex"); if (privateFile(bin, "file")) return bin; }
+  return null;
+}
+export function codexSockets(dir = DEFAULT_CODEX_SOCKET_DIR) {
+  let names = []; try { names = fs.readdirSync(dir); } catch { return []; }
+  return names.filter((n) => /^[0-9a-f]{64}$/.test(n)).map((n) => path.join(dir, n)).filter((p) => privateFile(p, "socket"));
+}
 
 // The product path of the doorbell (M3). A post accepted for a Codex peer gets one durable intent
 // and one ring:
@@ -31,7 +51,8 @@ export class DoorbellService {
     this.store = store; this.settings = settings; this.codexPeers = codexPeers; this.claudePeers = claudePeers; this.sendClaude = sendClaude; this.alerts = alerts; this.now = now; this.enqueue = enqueue; this.cliVersion = cliVersion;
     this.running = new Map();
     // No shared "current target": every ring passes its own immutable target (review [상]).
-    this.wake = wake ?? new CodexWake({ root, authorize: (alias, messageId) => this.authorize(alias, messageId) });
+    const releases = settings.codexReleasesDir?.value ?? DEFAULT_CODEX_RELEASES;
+    this.wake = wake ?? new CodexWake({ root, authorize: (alias, messageId) => this.authorize(alias, messageId), cliFor: (version) => cliForVersion(version, releases), sockets: () => codexSockets(settings.codexSocketDir?.value ?? DEFAULT_CODEX_SOCKET_DIR) });
   }
   configured() { return Boolean(this.settings.codexCli?.value && this.settings.codexAppServerSocket?.value); }
   post(messageId) { return this.store.events.find((e) => e.type === "peer_post" && sameUuid(e.messageId, messageId)) ?? null; }

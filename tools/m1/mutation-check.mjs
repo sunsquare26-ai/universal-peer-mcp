@@ -51,7 +51,9 @@ const MUTANTS = [
   ["refused frame keeps no digest", "src/core/peer-core.mjs", "if (typeof content === \"string\" && content.length > 0) digest = bodyDigest(content);", "void content;", "test/m0/reply-framing.test.mjs"],
   // M3
   ["queue takes a body", "src/extensions/codex-queue/index.mjs", "  if (!match) throw fail(\"INVALID_QUEUE_CALL\");\n  const argv = queueArgv(target.threadId, match[1]);", "  const argv = [\"queue\", \"--thread\", target.threadId, \"--message\", text];", "test/m0/doorbell-contract.test.mjs"],
-  ["version mismatch ignored", "src/extensions/codex-queue/index.mjs", "if ((await this.cliVersion(target.cliPath)) !== serverVersion) throw fail(\"VERSION_MISMATCH\");", "", "test/m3/codex-wake.test.mjs"],
+  ["version mismatch ignored", "src/extensions/codex-queue/index.mjs", "if (!cliPath || (await this.cliVersion(cliPath).catch(() => null)) !== serverVersion) throw fail(\"VERSION_MISMATCH\");", "", "test/m3/codex-wake.test.mjs"],
+  ["CLI not chosen by server release", "src/extensions/codex-queue/index.mjs", "cliPath = (await this.cliFor?.(serverVersion)) ?? null;", "cliPath = cliPath;", "test/m3/codex-wake.test.mjs"],
+  ["only the configured socket is tried", "src/extensions/codex-queue/index.mjs", "const candidates = [target.socketPath, ...((await this.sockets?.()) ?? [])]", "const candidates = [target.socketPath]", "test/m3/codex-wake.test.mjs"],
   ["running turn gets a new turn", "src/extensions/codex-queue/index.mjs", "params.expectedTurnId = activeTurnId; method = \"turn/steer\";", "method = \"turn/start\";", "test/m3/codex-wake.test.mjs"],
   ["held reported as queued", "src/extensions/codex-queue/index.mjs", "mode: state === \"active\" ? \"held_behind_running_turn\" : \"queued\"", "mode: \"queued\"", "test/m0/held-queue.test.mjs"],
   ["target keys unchecked", "src/extensions/codex-queue/index.mjs", "    if (Object.keys(entry).some((key) => !TARGET_KEYS.has(key))) throw fail(\"TARGET_UNAVAILABLE\");\n", "", "test/m0/doorbell-contract.test.mjs"],

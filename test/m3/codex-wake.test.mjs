@@ -24,13 +24,40 @@ test("an app-server that does not state its release is refused", async () => {
   await expect(new CodexWake({ root: r, connect }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "VERSION_UNKNOWN" });
 });
 
-test("a pinned codexVersion that the app-server does not match is refused", async () => {
-  const r = await root(); const cli = await writeCli(r, { version: "0.159.0" }); await writeTargets(r, { transport: "existing-app-server", cliPath: cli, threadId: THREAD_UUID, cwd: r, socketPath: path.join(r, "s.sock"), codexVersion: "0.158.0" });
-  const s = await import("node:net"); const server = s.createServer(() => {}); await new Promise((ok) => server.listen(path.join(r, "s.sock"), ok)); await fs.chmod(path.join(r, "s.sock"), 0o600);
+test("the release follows the server: a stale codexVersion pin does not stop the app-server path; a CLI of the server's release is found per call", async () => {
+  const r = await root(); const old = await writeCli(r, { version: "0.159.0" });
+  const net = await import("node:net"); const server = net.createServer(() => {}); await new Promise((ok) => server.listen(path.join(r, "s.sock"), ok)); await fs.chmod(path.join(r, "s.sock"), 0o600);
+  await writeTargets(r, { transport: "existing-app-server", cliPath: old, threadId: THREAD_UUID, cwd: r, socketPath: path.join(r, "s.sock"), codexVersion: "0.159.0" });
+  const newer = path.join(r, "rel", "0.159.1-aarch64-apple-darwin", "bin"); await fs.mkdir(newer, { recursive: true });
+  const cli2 = await writeCli(newer, { version: "0.159.1" });
+  const asked = [];
   try {
-    await expect(new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.159.0" }) }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
+    const wake = new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.159.1" }), cliFor: (v) => { asked.push(v); return v === "0.159.1" ? cli2 : null; } });
+    expect(await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).toMatchObject({ mode: "started" });
+    expect(asked).toEqual(["0.159.1"]);
+    // No CLI of that release anywhere: not sent.
+    const none = new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.160.0" }), cliFor: () => null });
+    await expect(none.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
   } finally { server.close(); }
 });
+
+test("the thread is looked for on every offered socket; a server that does not hold it is skipped", async () => {
+  const r = await root(); const cli = await writeCli(r, { version: "0.159.0" });
+  const net = await import("node:net"); const s1 = net.createServer(() => {}); const s2 = net.createServer(() => {});
+  await new Promise((ok) => s1.listen(path.join(r, "a.sock"), ok)); await new Promise((ok) => s2.listen(path.join(r, "b.sock"), ok));
+  await fs.chmod(path.join(r, "a.sock"), 0o600); await fs.chmod(path.join(r, "b.sock"), 0o600);
+  await writeTargets(r, { transport: "existing-app-server", cliPath: cli, threadId: THREAD_UUID, socketPath: path.join(r, "a.sock") });
+  const seen = [];
+  const connect = (sock) => { seen.push(path.basename(sock)); const holds = sock.endsWith("b.sock"); const base = fakeConnect({ root: r, version: "0.159.0" })(); return { ...base, call: async (m, p) => (m === "thread/loaded/list" ? { data: holds ? [THREAD_UUID] : [] } : base.call(m, p)) }; };
+  try {
+    const wake = new CodexWake({ root: r, connect, sockets: () => [path.join(r, "b.sock")] });
+    expect(await wake.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).toMatchObject({ mode: "started" });
+    expect(seen).toEqual(["a.sock", "b.sock"]);
+    const nowhere = new CodexWake({ root: r, connect: (sock) => { const base = fakeConnect({ root: r, version: "0.159.0" })(); return { ...base, call: async (m, p) => (m === "thread/loaded/list" ? { data: [] } : base.call(m, p)) }; }, sockets: () => [path.join(r, "b.sock")] });
+    await expect(nowhere.wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "TARGET_UNAVAILABLE" });
+  } finally { s1.close(); s2.close(); }
+});
+
 
 async function appServerTarget(r) {
   const net = await import("node:net"); const server = net.createServer(() => {});
