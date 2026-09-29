@@ -19,7 +19,7 @@ const MUTANTS = [
   ["doorbell sends without intent", "src/core/doorbell.mjs", "return { state: \"not_sent\", reason: \"trace_intent_failed\", code: typeof error?.code === \"string\" ? error.code : null, attemptId };", "void error;", "test/m1/doorbell.test.mjs"],
   ["attempt takes free text", "src/core/attempts.mjs", "for (const key of Object.keys(args)) if (!allowed.includes(key)) throw invalid(`unsupported field ${key}`);", "", "test/m1/attempts.test.mjs"],
   ["alert not deduped", "src/core/alerts.mjs", "if (this.keys.has(key)) return { raised: false, duplicate: true };", "", "test/m1/alerts.test.mjs"],
-  ["no daemon_started row", "src/daemon.mjs", "await store.append(\"daemon_started\", { generationId, daemonPid: process.pid, daemonProcStart: selfProcStart, buildId: BUILD_ID });", "", "test/m1/daemon-observation.test.mjs"],
+  ["no daemon_started row", "src/daemon.mjs", "await store.append(\"daemon_started\", { generationId, daemonPid: process.pid, daemonProcStart: selfProcStart, buildId: BUILD_ID, settings: settingsStatus(settings) });", "", "test/m1/daemon-observation.test.mjs"],
   ["trace leaks the body", "src/core/trace.mjs", "for (const key of [\"reason\", \"errorCode\",", "for (const key of [\"body\", \"bodyFile\", \"reason\", \"errorCode\",", "test/m1/trace.test.mjs"],
   ["bridge accepts any key", "tools/alert-bridge/air-notify.sh", "[[ \"$key\" =~ ^[a-z0-9_:.-]{1,160}$ ]] || { echo \"bad key\" >&2; exit 64; }", "", "test/m1/air-notify.test.mjs"],
   ["bridge notifies before logging", "tools/alert-bridge/air-notify.sh", "printf '%s alert kind=%s key=%s code=%s\\n' \"$now\" \"$kind\" \"$key\" \"$code\" >> \"$log\" || exit 1", "true", "test/m1/air-notify.test.mjs"],
@@ -33,6 +33,22 @@ const MUTANTS = [
   ["header keeps unknown tokens", "src/core/protocol-header.mjs", "if (!field || field in header) continue;", "if (!field) { header[token.slice(0, at)] = token.slice(at + 1); continue; } if (field in header) continue;", "test/m1/protocol-header.test.mjs"],
   ["header keeps a non-protocol line", "src/core/protocol-header.mjs", "if (!HEADER_VERBS.includes(verb)) return null;", "if (!HEADER_VERBS.includes(verb)) return { verb: line };", "test/m1/protocol-header.test.mjs"],
   ["spool stores the first line", "src/core/inbound-spool.mjs", "const header = protocolHeader(body); return header === null ? {} : { header };", "return { firstLine: body.split(\"\\n\")[0] };", "test/m1/retention.test.mjs"],
+  // M2
+  ["forged post accepted", "src/core/peer-core.mjs", "if (unauthenticated) { await quarantine(this.store, { reason: \"sender_unauthenticated\", content, header, who }); return null; }\n        await acceptPost(", "await acceptPost(", "test/m2/posts.test.mjs"],
+  ["other session allowlisted", "src/core/sender-auth.mjs", "if (!alias) return { authenticated: false, reason: \"session_not_allowlisted\", pid, sessionId: row.sessionId };", "if (!alias) return { authenticated: true, alias: \"friday-main\", sessionId: row.sessionId, pid, procStart: row.procStart, depth };", "test/m2/sender-auth.test.mjs"],
+  ["recycled pid accepted", "src/core/sender-auth.mjs", "if (live === null || live !== normalizeProcStart(row.procStart)) return", "if (false) return", "test/m2/sender-auth.test.mjs"],
+  ["concurrent duplicate becomes a second post", "src/core/posts.mjs", "(events) => (firstPost(events, messageId) ? refuse(\"POST_RACE\", \"lost the race\") : null)", "() => null", "test/m2/posts.test.mjs"],
+  ["processed twice", "src/core/posts.mjs", "(events.some((e) => e.type === \"peer_post_processed\" && sameUuid(e.messageId, messageId)) ? refuse(\"ALREADY_PROCESSED\", \"already processed\") : null)", "null", "test/m2/posts.test.mjs"],
+  ["self-referencing ACK accepted", "src/core/peer-core.mjs", "if (selfReferencing(marker)) return", "if (false) return", "test/m0/reply-framing.test.mjs"],
+  ["link to a missing request", "src/core/posts.mjs", "if (!request) throw refuse(\"LINK_REFUSED\", \"no request with that id\");", "if (!request) return { linked: false };", "test/m2/posts.test.mjs"],
+  ["group ids random", "src/core/posts.mjs", "return uuidv5(`${groupId}:${alias}`);", "return crypto.randomUUID();", "test/m2/posts.test.mjs"],
+  ["daemon row is a successor", "src/adapters/claude-native-v1/registry.mjs", "function isSelfRow(row, options = {}) { return row?.name === SELF_ROW_NAME || row?.pid === (options.selfPid ?? process.pid); }", "function isSelfRow() { return false; }", "test/m2/rebind-gaps.test.mjs"],
+  ["fork inherited", "src/core/session-rebind.mjs", "  if (argv.some((token) => FORK_FLAGS.includes(token))) return false;\n", "", "test/m2/rebind-gaps.test.mjs"],
+  ["same process inherited", "src/adapters/claude-native-v1/registry.mjs", "if (prior && Number.isInteger(prior.pid) && chosen.row.pid === prior.pid", "if (false && prior", "test/m2/rebind-gaps.test.mjs"],
+  ["chain reported as no proof", "src/adapters/claude-native-v1/registry.mjs", "    if (chained) throw", "    if (false) throw", "test/m2/rebind-gaps.test.mjs"],
+  ["env beats file", "src/core/settings.mjs", "    if (fromFile && fromFile[key] !== undefined) { out[key] = { value: fromFile[key], source: \"file\" }; continue; }\n", "", "test/m2/settings.test.mjs"],
+  ["broken file falls back to env", "src/core/settings.mjs", "    if (invalid) { out[key] = { value: null, source: \"config_invalid\" }; continue; }\n", "", "test/m2/settings.test.mjs"],
+  ["refused frame keeps no digest", "src/core/peer-core.mjs", "if (typeof content === \"string\" && content.length > 0) digest = bodyDigest(content);", "void content;", "test/m0/reply-framing.test.mjs"],
   ["trace calls queued delivered", "src/core/trace.mjs", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\"]);", "const TERMINAL = new Set([\"acked\", \"replied\", \"failed\", \"queued\"]);", "test/m1/trace.test.mjs"]
 ];
 

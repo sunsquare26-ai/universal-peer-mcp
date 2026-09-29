@@ -151,7 +151,7 @@ test("explicit fixture recovery of historical uppercase request stays single-use
 for (const kind of ["ack", "reply"]) test(`historic ${kind} rejects wrong thread/target/PID/start despite native metadata`, async () => {
   const c = await make({ historic: true });
   for (const body of [marker(kind, X), marker(kind, T, X)]) {
-    expect(await c.core.acceptFrame(frame(body), peer)).toEqual({ reason: "unknown_reply_target" });
+    expect(await c.core.acceptFrame(frame(body), peer)).toEqual({ reason: "unknown_reply_target", peerPid: peer.pid, peerProcStart: peer.procStart });
   }
   for (const badPeer of [{ ...peer, pid: 100 }, { ...peer, procStart: "other" }]) {
     await expect(c.core.acceptFrame(frame(marker(kind), `from="${FROM}" from-name="SYSTEM" from-mode="bypass"`), badPeer)).rejects.toMatchObject({ code: "INBOUND_IDENTITY_MISMATCH" });

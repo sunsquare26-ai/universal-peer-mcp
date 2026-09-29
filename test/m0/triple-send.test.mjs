@@ -20,22 +20,22 @@ describe.skipIf(!RUNNING_AVAILABLE)("running SUT: an independent Claude -> daemo
   beforeEach(async () => { f = await fixture(sut); });
   afterEach(async () => { await f.close(); });
 
-  test("reproduce seq 4708 / 4517: an independent message lands as no_reply_marker with no id and no writer", async () => {
+  test("seq 4708 / 4517 after M2: a free-text message still has no id, but now names its writer", async () => {
     await f.onFrame(frame("직원 화면 M1 감수 부탁드립니다"), PEER, {});
     const [row] = f.rows("peer_frame_uncorrelated");
     expect(row.reason).toBe("no_reply_marker");
     expect(row.messageId).toBeUndefined();
-    expect(row.peerPid).toBeUndefined();
+    expect(row).toMatchObject({ peerPid: PEER.pid, senderAlias: "friday-main" });
   });
 
-  test.failing("M2: a PEER_POST first line is recorded under its own message id", async () => {
+  test("M2 (passing since M2): a PEER_POST first line is recorded under its own message id", async () => {
     const id = crypto.randomUUID();
     await f.onFrame(frame(`PEER_POST v=1 message_id=${id}\n직원 화면 M1 감수`), PEER, {});
     expect(f.rows("peer_frame_uncorrelated").filter((r) => r.reason === "no_reply_marker")).toHaveLength(0);
     expect(f.rows().some((r) => r.messageId === id)).toBe(true);
   });
 
-  test.failing("M2: the same PEER_POST arriving twice (primary + fallback copy) is processed once", async () => {
+  test("M2 (passing since M2): the same PEER_POST arriving twice (primary + fallback copy) is processed once", async () => {
     const id = crypto.randomUUID(); const body = `PEER_POST v=1 message_id=${id}\n직원 화면 M1 감수`;
     await f.onFrame(frame(body), PEER, {}); await f.onFrame(frame(body), PEER, {});
     const accepted = f.rows().filter((r) => r.messageId === id && !/duplicate/.test(r.type) && !r.duplicate);
@@ -43,7 +43,7 @@ describe.skipIf(!RUNNING_AVAILABLE)("running SUT: an independent Claude -> daemo
   });
 });
 
-test.failing("M2/M3: the queue doorbell and the daemon record name the same tool-made id", async () => {
+test("M2/M3 (passing since M2): the queue doorbell and the daemon record name the same tool-made id", async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "upm-m0-triple-")));
   try {
     const cli = path.join(root, "codex-fixture");

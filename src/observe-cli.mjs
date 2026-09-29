@@ -8,6 +8,8 @@ import { sendDoorbell } from "./core/doorbell.mjs";
 // `universal-peer-mcp stats [--days N] [--ledger <events.jsonl>]`
 // `universal-peer-mcp doorbell --thread <uuid> --message-id <uuid> [--alias <alias>]`
 // `universal-peer-mcp body-dispose --seq <n> --disposition processed|discard`
+// `universal-peer-mcp post --to a[,b] --body-file f [--group-id uuid]` | `inbox --recipient a` | `inbox-ack --message-id id`
+// `universal-peer-mcp link --seq <n> --message-id <request id> --as ack|reply [--verdict pass|fail]`
 //
 // With --ledger the file is read directly, read-only, and no daemon is contacted — the way to read
 // a copied ledger days later. Without it the running daemon answers. Output is JSON with ids,
@@ -52,6 +54,21 @@ export async function observeCommand(command, args) {
     const sourceSeq = Number(option(args, "--seq")); const disposition = option(args, "--disposition");
     const { controlCall } = await import("./core/control.mjs");
     return controlCall("inbound_body_dispose", { sourceSeq, disposition });
+  }
+  if (command === "post") {
+    // The sender writes only the text. Ids and the first line are the tool's (M2).
+    const to = (option(args, "--to") ?? "").split(",").filter(Boolean);
+    const bodyFile = option(args, "--body-file");
+    if (!bodyFile) throw new Error("usage: post --to a[,b] --body-file f [--group-id uuid]");
+    const body = fs.readFileSync(bodyFile, "utf8");
+    const { controlCall } = await import("./core/control.mjs");
+    return controlCall("peer_post", { to, body, ...(option(args, "--group-id") ? { groupId: option(args, "--group-id") } : {}) });
+  }
+  if (command === "inbox") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_inbox", { recipient: option(args, "--recipient") }); }
+  if (command === "inbox-ack") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_inbox_ack", { messageId: option(args, "--message-id") }); }
+  if (command === "link") {
+    const { controlCall } = await import("./core/control.mjs");
+    return controlCall("peer_link_unmatched", { sourceSeq: Number(option(args, "--seq")), messageId: option(args, "--message-id"), as: option(args, "--as"), ...(option(args, "--verdict") ? { verdict: option(args, "--verdict") } : {}) });
   }
   throw new Error("unknown command");
 }

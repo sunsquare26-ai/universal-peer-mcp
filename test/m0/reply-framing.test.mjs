@@ -41,19 +41,19 @@ describe.skipIf(!RUNNING_AVAILABLE)("running SUT: reply framing", () => {
     expect(row.evidence).toBe("application_ack");
   });
 
-  test.failing("M2: an unpaired row records the writer's pid and process start", async () => {
+  test("M2 (passing since M2): an unpaired row records the writer's pid and process start", async () => {
     await f.onFrame(frame("UP_REVERSE_PROBE 55238af8"), PEER, { connectionId: 1, frameOrdinal: 2 });
     const [row] = f.rows("peer_frame_uncorrelated");
     expect(row.peerPid).toBe(PEER.pid);
     expect(row.peerProcStart).toBe(PEER.procStart);
   });
 
-  test.failing("M2: an ACK whose own message_id is the request id is not an ACK", async () => {
+  test("M2 (passing since M2): an ACK whose own message_id is the request id is not an ACK", async () => {
     await f.onFrame(frame(strictAck(f.requestId, f.requestId)), PEER, {});
     expect(f.rows("peer_ack")).toHaveLength(0);
   });
 
-  test.failing("M2: a refused reply (writer identity mismatch) still leaves a body hash to link later", async () => {
+  test("M2 (passing since M2): a refused reply (writer identity mismatch) still leaves a body hash to link later", async () => {
     const other = { pid: PEER.pid + 1, procStart: PEER.procStart };
     await f.onFrame(frame(`${strictAck(crypto.randomUUID(), f.requestId)}\n본문`), other, {}).catch(() => {});
     const [row] = f.rows("peer_frame_refused");

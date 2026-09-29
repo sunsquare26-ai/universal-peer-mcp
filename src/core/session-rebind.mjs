@@ -59,7 +59,12 @@ export function proveResumeSuccession(pid, expectedSessionId, { argvReader, pare
   return null;
 }
 
+// `--fork-session` beside `--resume <id>` starts a new conversation copied from <id>; the original
+// may still be live elsewhere, so a fork is never the successor of the session it copied (M2).
+export const FORK_FLAGS = Object.freeze(["--fork-session"]);
+
 function carriesReceipt(argv, expectedSessionId) {
+  if (argv.some((token) => FORK_FLAGS.includes(token))) return false;
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (typeof token !== "string") continue;
@@ -103,8 +108,12 @@ export function createSessionRebinder({
       const row = await record(store, "target_rebind_failed", { alias, expectedSessionId: expected.sessionId, reason: "rebind_disabled", candidateCount: 0, rebind: chosen, recovery: message });
       throw Object.assign(new Error(message), { diagnostic: "rebind_disabled", ...linked(row) });
     }
+    // M2: what the ledger knows about who held the expected id, and which ids this alias held
+    // before it. Both are read, not trusted: they only ever make the check stricter.
+    let history = [];
+    if (stateFile !== null) { try { history = previousSessionIdsFor(await readState(stateFile), alias); } catch {} }
     let found;
-    try { found = await resolveSuccessor(expected, options); }
+    try { found = await resolveSuccessor(expected, { ...options, previousGeneration: previousGenerationOf(store, alias, expected.sessionId), previousSessionIds: history }); }
     catch (error) {
       // A refusal this path recognises carries its own diagnostic. Anything else is a failure of the
       // ordinary verification — a moved directory, a socket that is not private — and it is left
@@ -162,6 +171,16 @@ export function createSessionRebinder({
 // A diagnosis is worth less than the thing it diagnoses. A ledger that cannot be appended to is
 // already reported by every other writer on this path, and losing the original failure to it would
 // leave the caller with nothing at all.
+// The last process the ledger saw holding `sessionId` for `alias`: the target of the latest send to it.
+export function previousGenerationOf(store, alias, sessionId) {
+  const events = store?.events ?? [];
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const row = events[i];
+    if (row.type === "send_requested" && (row.targetAlias ?? row.alias) === alias && sameUuid(row.targetSessionId ?? "", sessionId) && Number.isInteger(row.targetPid)) return { pid: row.targetPid, procStart: row.targetProcStart };
+  }
+  return null;
+}
+
 // The seq of the rebind row travels with the error, so the `target_resolve_failed` row the caller
 // writes for the same failure can name it and the daily count sees one failure, not two.
 function linked(row) { return Number.isInteger(row?.seq) ? { rebindFailedSeq: row.seq } : {}; }

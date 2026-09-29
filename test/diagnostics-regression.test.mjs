@@ -92,7 +92,7 @@ test("D12 malformed verdict/version and duplicate fields refuse correlation",()=
 test("D13 same-line reply correlates only to the bound thread and peer",()=>withCore(async({core,store,peer})=>{
  await core.send(args);
  const body=`PEER_REPLY re=${M} thread=${T} verdict=pass | hello`;
- expect(await core.acceptFrame({message:{content:body.replace(T,R)}},peer)).toEqual({reason:"reply_thread_mismatch"});
+ expect(await core.acceptFrame({message:{content:body.replace(T,R)}},peer)).toEqual({ reason: "reply_thread_mismatch", peerPid: peer.pid, peerProcStart: peer.procStart });
  await expect(core.acceptFrame({message:{content:body}},{...peer,pid:100})).rejects.toMatchObject({code:"INBOUND_IDENTITY_MISMATCH"});
  await core.acceptFrame({message:{content:body}},peer);expect(store.events.at(-1)).toMatchObject({type:"peer_reply",messageId:M,threadId:T,verdict:"pass"});
 }));

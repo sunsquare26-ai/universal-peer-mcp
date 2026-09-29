@@ -83,7 +83,7 @@ describe("an envelope-wrapped reply correlates", () => {
   test("an envelope whose declared writer is not the frame's writer is not unwrapped", async () => {
     const ctx = await make();
     const forged = { type: "user", from: "uds:/tmp/somebody-else.sock", message: { content: senderEnvelope({ from: FROM, body: marker("reply") }) } };
-    expect(await ctx.core.acceptFrame(forged, ctx.peer)).toEqual({ reason: "no_reply_marker" });
+    expect(await ctx.core.acceptFrame(forged, ctx.peer)).toEqual({ reason: "no_reply_marker", peerPid: ctx.peer.pid, peerProcStart: ctx.peer.procStart });
     expect(ctx.store.events.some((event) => event.type === "peer_reply")).toBeFalse();
     expect(ctx.calls).toEqual([]);
   });
@@ -115,9 +115,9 @@ describe("onCorrelatedReply", () => {
 
   test("is not called when nothing correlates, and not called when the writer is the wrong process", async () => {
     const ctx = await make();
-    expect(await ctx.core.acceptFrame(wrapped("not a marker at all"), ctx.peer)).toEqual({ reason: "no_reply_marker" });
-    expect(await ctx.core.acceptFrame(wrapped(marker("reply", { replyTo: "10000000-0000-4000-8000-0000000000ff" })), ctx.peer)).toEqual({ reason: "unknown_reply_target" });
-    expect(await ctx.core.acceptFrame(wrapped(marker("reply", { thread: "10000000-0000-4000-8000-0000000000fe" })), ctx.peer)).toEqual({ reason: "unknown_reply_target" });
+    expect(await ctx.core.acceptFrame(wrapped("not a marker at all"), ctx.peer)).toEqual({ reason: "no_reply_marker", peerPid: ctx.peer.pid, peerProcStart: ctx.peer.procStart });
+    expect(await ctx.core.acceptFrame(wrapped(marker("reply", { replyTo: "10000000-0000-4000-8000-0000000000ff" })), ctx.peer)).toEqual({ reason: "unknown_reply_target", peerPid: ctx.peer.pid, peerProcStart: ctx.peer.procStart });
+    expect(await ctx.core.acceptFrame(wrapped(marker("reply", { thread: "10000000-0000-4000-8000-0000000000fe" })), ctx.peer)).toEqual({ reason: "unknown_reply_target", peerPid: ctx.peer.pid, peerProcStart: ctx.peer.procStart });
     await expect(ctx.core.acceptFrame(wrapped(marker("reply")), { pid: 100, procStart: "start" })).rejects.toThrow("identity mismatch");
     expect(ctx.calls).toEqual([]);
     expect(ctx.store.events.some((event) => event.type === "peer_reply")).toBeFalse();

@@ -28,6 +28,9 @@ import { dailyStats, traceMessage } from "./core/trace.mjs";
 import { disposeInboundBody, expiredBodyFiles } from "./core/retention.mjs";
 import { maintenanceConfig, MAINTENANCE_INTERVAL_MS, runMaintenance } from "./core/maintenance.mjs";
 import { dayOf } from "./core/days.mjs";
+import { loadSettings, settingsStatus } from "./core/settings.mjs";
+import { createSenderResolver } from "./core/sender-auth.mjs";
+import { acceptPost, ackInbox, bodyDigest, inbox, linkUnmatched, recipientMessageId } from "./core/posts.mjs";
 
 const buildObservation = observeBuild();
 const paths = statePaths(); const admin = process.env.CLAUDE_PEER_MCP_ADMIN === "1";
@@ -75,11 +78,14 @@ let targetsDigest = startupTable.digest;
 // restart fell. The alarm sink is local and durable (src/core/alerts.mjs); the ledger reports its
 // own death through it, once.
 const generationId = crypto.randomUUID();
-const alertCommand = typeof process.env.UNIVERSAL_PEER_ALERT_COMMAND === "string" && path.isAbsolute(process.env.UNIVERSAL_PEER_ALERT_COMMAND) ? process.env.UNIVERSAL_PEER_ALERT_COMMAND : null;
-const alerts = new AlertSink({ file: path.join(paths.root, "alerts.jsonl"), command: alertCommand });
+// Settings come from <state>/config.json first, then the environment (src/core/settings.mjs): the
+// environment is whichever serve started this daemon, which is not a place settings can live.
+const settings = await loadSettings({ root: paths.root });
+const alerts = new AlertSink({ file: path.join(paths.root, "alerts.jsonl"), command: settings.alertCommand.value });
 const store = new EventStore(paths, { onPoisoned: (health) => alerts.raise({ kind: "ledger_poisoned", key: `ledger_poisoned:${generationId}`, code: health.lastError?.code ?? null }) });
 await store.init();
-await store.append("daemon_started", { generationId, daemonPid: process.pid, daemonProcStart: selfProcStart, buildId: BUILD_ID });
+await store.append("daemon_started", { generationId, daemonPid: process.pid, daemonProcStart: selfProcStart, buildId: BUILD_ID, settings: settingsStatus(settings) });
+if (settings.invalid) { process.stderr.write(`universal-peer: ${paths.root}/config.json ignored (${settings.invalid}); alerts and backup not configured\n`); await store.append("daemon_config_invalid", { reason: settings.invalid }).catch(() => {}); }
 // Which reader has already been served which body, so a read is recorded once per reader process.
 const bodyReads = new Set(store.events.filter((row) => row.type === "inbound_body_read").map((row) => `${row.sourceSeq}|${row.readerPid}|${row.readerProcStart}`));
 let maintenance = { lastRun: null, running: false };
@@ -120,7 +126,10 @@ const rebindTarget = createSessionRebinder({
   targetsFile: paths.targets, stateFile: paths.rebindState, store, resolveSuccessor,
   afterWrite: () => refreshTargets()
 });
-core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, rebind: rebindTarget });
+// M2: inbound frames and control-socket posts are attributed to a Claude session only through the
+// kernel pid, Claude Code's registry row and the operator's table (src/core/sender-auth.mjs).
+const resolveSender = createSenderResolver({ allowlist: () => targets, selfPid: process.pid });
+core = new PeerCore({ targets, store, address: receiver.address, sender: boundedSender, inboundSpool, rebind: rebindTarget, senderResolver: (peer) => resolveSender(peer) });
 if (enabledExtensions.includes("milestone")) { milestone = new MilestoneExtension({ store, core }); await milestone.reconcile(); }
 if (enabledExtensions.includes("code-review")) codeReview = new CodeReviewExtension({ store, core });
 const token = crypto.randomBytes(32).toString("hex"); let closing = false;
@@ -200,6 +209,10 @@ async function dispatch(method, args, caller = null) {
   if (method === "peer_wait") return withInlineBodies(await core.wait(args), caller, method);
   if (method === "peer_list_events") { const listing = core.events(args); return withInlineBodies({ ...listing, events: listing.events.map(publicLedgerEvent) }, caller, method); }
   if (method === "trace_attempt") return recordAttempt(store, args);
+  if (method === "peer_post") return post(args, caller);
+  if (method === "peer_inbox") { if (typeof args.recipient !== "string" || !/^[a-z][a-z0-9-]{1,47}$/.test(args.recipient)) throw Object.assign(new Error("recipient must be an alias"), { code: "INVALID_CONTROL_ARGUMENTS" }); return withInlineBodies({ events: inbox(store.events, args.recipient, { afterSeq: Number.isInteger(args.afterSeq) ? args.afterSeq : 0 }) }, caller, method); }
+  if (method === "peer_inbox_ack") return ackInbox(store, { messageId: args.messageId, reader: { readerPid: caller?.pid, readerProcStart: caller?.procStart } });
+  if (method === "peer_link_unmatched") return linkUnmatched(store, { sourceSeq: args.sourceSeq, messageId: args.messageId, as: args.as, verdict: args.verdict ?? null, by: { linkedByPid: caller?.pid } });
   if (method === "inbound_body_dispose") return disposeInboundBody({ root: paths.root, store, sourceSeq: args.sourceSeq, disposition: args.disposition });
   if (method === "trace_message") { if (typeof args.messageId !== "string" || !/^[0-9a-f-]{36}$/i.test(args.messageId)) throw Object.assign(new Error("messageId must be a uuid"), { code: "INVALID_CONTROL_ARGUMENTS" }); return traceMessage(store.events, args.messageId); }
   if (method === "ledger_daily_stats") { const days = Number.isInteger(args.days) && args.days > 0 && args.days <= 400 ? args.days : 30; return { days: dailyStats(store.events, { sinceDay: dayOf(Date.now() - (days - 1) * 86_400_000) }) }; }
@@ -211,7 +224,7 @@ async function dispatch(method, args, caller = null) {
   if (method === "code_review_list" && codeReview) return codeReview.list(args);
   if (method === "code_review_wait" && codeReview) return codeReview.wait(args);
   if (method === "code_review_request" && codeReview) return codeReview.request(args);
-  if (method === "daemon_status") return { daemonBuild: buildObservation(), running: true, pid: process.pid, procStart: identity.procStart, admin, enabledExtensions, eventSeq: store.events.at(-1)?.seq ?? 0, targetCount: Object.keys(targets).length, targetsDigest, generationId, ledger: store.health(), maintenance: { lastRun: maintenance.lastRun, running: maintenance.running }, alerts: alerts.status() };
+  if (method === "daemon_status") return { daemonBuild: buildObservation(), running: true, pid: process.pid, procStart: identity.procStart, admin, enabledExtensions, eventSeq: store.events.at(-1)?.seq ?? 0, targetCount: Object.keys(targets).length, targetsDigest, generationId, ledger: store.health(), maintenance: { lastRun: maintenance.lastRun, running: maintenance.running }, alerts: alerts.status(), settings: settingsStatus(settings) };
   if (method === "daemon_shutdown" && admin) return { shuttingDown: true };
   throw new Error("unknown or unavailable daemon method");
 }
@@ -234,6 +247,27 @@ async function withInlineBodies(result, caller = null, method = null) {
   return { ...result, ...(hydrated ? { event: hydrated } : {}), events };
 }
 
+// M2: an independent message from a Claude session, through the control socket. The tool issues the
+// ids: one group id per send, and per recipient a UUIDv5 of (group, alias) — so resending the same
+// group (same groupId) is a duplicate per recipient, never a second message. The caller must be a
+// Claude session in the target table (walked up from the calling process); anything else is
+// refused and recorded by digest only.
+async function post(args, caller) {
+  const allowed = new Set(["to", "body", "groupId"]);
+  if (!args || typeof args !== "object" || Object.keys(args).some((k) => !allowed.has(k)) || !Array.isArray(args.to) || args.to.length === 0 || args.to.length > 8 || typeof args.body !== "string" || args.body.length === 0) throw Object.assign(new Error("peer_post takes to[1..8], body, optional groupId"), { code: "INVALID_CONTROL_ARGUMENTS" });
+  const auth = await resolveSender({ pid: caller?.pid, procStart: caller?.procStart }, { walk: true });
+  const who = { peerPid: caller?.pid, peerProcStart: caller?.procStart, ...(auth.authenticated ? { senderAlias: auth.alias, senderSessionId: auth.sessionId } : { senderAuth: auth.reason }) };
+  if (!auth.authenticated) { await store.append("peer_post_refused", { reason: auth.reason, ...bodyDigest(args.body), ...who }); throw Object.assign(new Error("the calling process is not an allowlisted Claude session"), { code: "SENDER_UNAUTHENTICATED" }); }
+  const groupId = args.groupId ?? crypto.randomUUID();
+  const recipients = [...new Set(args.to)];
+  const results = [];
+  for (const recipient of recipients) {
+    const messageId = recipientMessageId(groupId, recipient);
+    results.push({ recipient, messageId, ...(await acceptPost({ store, spool: inboundSpool, messageId, recipient, body: args.body, who, source: "control" })) });
+  }
+  return { groupId, from: auth.alias, results };
+}
+
 // "Receiver read" for M1: a body handed out inline to a caller process is a read by that process.
 // Recorded once per (row, reader process); never fails the read that triggered it.
 async function recordBodyReads(rows, caller, method) {
@@ -252,7 +286,7 @@ async function recordBodyReads(rows, caller, method) {
 async function maintain() {
   if (maintenance.running || closing) return;
   maintenance.running = true;
-  try { const report = await runMaintenance({ root: paths.root, store, alerts, config: maintenanceConfig() }); maintenance.lastRun = { at: report.at, archived: report.archived.length, late: report.late.length, expired: report.expiry?.expired ?? 0, backup: report.backup?.configured ? (report.backup.error ?? "ok") : "not_configured", errors: report.errors.map((e) => `${e.step}:${e.code}`) }; }
+  try { const report = await runMaintenance({ root: paths.root, store, alerts, config: { ...maintenanceConfig(), backupDestination: settings.archiveBackup.value } }); maintenance.lastRun = { at: report.at, archived: report.archived.length, late: report.late.length, expired: report.expiry?.expired ?? 0, backup: report.backup?.configured ? (report.backup.error ?? "ok") : "not_configured", errors: report.errors.map((e) => `${e.step}:${e.code}`) }; }
   catch (error) { maintenance.lastRun = { at: new Date().toISOString(), errors: [`maintenance:${typeof error?.code === "string" ? error.code : "FAILED"}`] }; }
   finally { maintenance.running = false; }
 }

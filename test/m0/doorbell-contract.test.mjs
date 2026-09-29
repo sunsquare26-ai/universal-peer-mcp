@@ -80,7 +80,7 @@ describe("SUT codex-queue adapter: the queue carries only the doorbell (M3)", ()
     for (const [flag] of FORBIDDEN_QUEUE_FLAGS) expect(argv).not.toContain(flag);
   }));
 
-  test.failing("M3: a wake puts the doorbell, and not one byte of the body, into the queue", () => queueFixture(async (f) => {
+  test("M3 (passing since M2): a wake puts the doorbell, and not one byte of the body, into the queue", () => queueFixture(async (f) => {
     const messageId = crypto.randomUUID();
     await new CodexWake({ root: f.root }).wake({ codexAlias: "codex-main", messageId, body: BODY });
     const argv = await f.argv();

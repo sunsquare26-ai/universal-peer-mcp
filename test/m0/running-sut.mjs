@@ -31,7 +31,10 @@ export async function fixture(sut, { requestId = crypto.randomUUID() } = {}) {
   const store = new sut.EventStore(paths); await store.init();
   const core = new sut.PeerCore({
     targets: { "friday-main": { sessionId: THREAD, cwd: root, permissionMode: "bypass" } },
-    store, address: "uds:/tmp/cc-socks/3390.sock", inboundSpool: new sut.InboundSpool(paths)
+    store, address: "uds:/tmp/cc-socks/3390.sock", inboundSpool: new sut.InboundSpool(paths),
+    // M2: the writer PEER is the target session (friday-main). Frames from any other pid are
+    // unauthenticated. Ignored by builds before M2.
+    senderResolver: async (peer) => (peer?.pid === PEER.pid ? { authenticated: true, alias: "friday-main", sessionId: THREAD, pid: peer.pid, procStart: peer.procStart } : { authenticated: false, reason: "no_session_row" })
   });
   const onFrame = sut.frameObserver({ core, store });
   await store.reserveRequest({

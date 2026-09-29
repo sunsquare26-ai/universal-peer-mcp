@@ -45,7 +45,7 @@ export async function resolveSuccessor(expected, options = {}) {
   // this lane or another, and it is what the argv walk is not allowed to walk through.
   const live = await liveRows(reading, () => true);
   const boundary = new Set(live.map(({ row }) => row.pid).filter((pid) => Number.isInteger(pid)));
-  const sameLane = await sameLaneRows(live, expected);
+  const sameLane = (await sameLaneRows(live, expected)).filter(({ row }) => !isSelfRow(row, options));
   const cwdCheck = expected?.cwd == null ? "skipped" : "enforced";
   // (a) is already true of everything in `sameLane` — `liveRows` proved the process behind each row
   // is this account's and started when the row says it did. (b) is this loop.
@@ -53,6 +53,12 @@ export async function resolveSuccessor(expected, options = {}) {
   for (const entry of sameLane) {
     const proof = proveResumeSuccession(entry.row.pid, expected.sessionId, { argvReader, parentReader, boundary });
     if (proof) proven.push({ ...entry, proof });
+  }
+  if (proven.length === 0 && Array.isArray(options.previousSessionIds) && options.previousSessionIds.length > 0) {
+    // A live session carrying a receipt for an id the table held *before* the current one is a
+    // chain (A -> B -> C). Nothing proves C took over B, so it is refused by name, not as "no proof".
+    const chained = sameLane.some((entry) => options.previousSessionIds.some((id) => proveResumeSuccession(entry.row.pid, id, { argvReader, parentReader, boundary })));
+    if (chained) throw Object.assign(new Error(`alias session ${expected.sessionId} has no successor; a live session resumes an older id of this alias, and chained succession is not supported — re-register the alias by hand`), { diagnostic: "rebind_chain_unsupported", expectedSessionId: expected.sessionId, candidateCount: 0, cwdCheck, liveCandidates: reportedCandidates(sameLane) });
   }
   if (proven.length !== 1) {
     const diagnostic = proven.length === 0 ? "rebind_no_proof" : "rebind_ambiguous";
@@ -62,6 +68,12 @@ export async function resolveSuccessor(expected, options = {}) {
     });
   }
   const chosen = proven[0];
+  // The process that last held the expected id, as the ledger saw it. The same process now under a
+  // different id changed sessions in place (`/clear`, a picker switch): not a successor.
+  const prior = options.previousGeneration;
+  if (prior && Number.isInteger(prior.pid) && chosen.row.pid === prior.pid && normalizeProcStart(chosen.row.procStart) === normalizeProcStart(prior.procStart)) {
+    throw Object.assign(new Error(`alias session ${expected.sessionId} changed id inside the same process (pid ${prior.pid}); an in-place session change (/clear, continue, picker) is never inherited — re-register the alias by hand`), { diagnostic: "rebind_same_process", expectedSessionId: expected.sessionId, candidateCount: 1, cwdCheck, liveCandidates: reportedCandidates(sameLane) });
+  }
   // The successor is then put through the identical verification an exactly-matching row goes
   // through — cwd, protocol, socket privacy, key identity, permission-mode argv. Succession decides
   // *which* row is examined and relaxes nothing about what the row has to survive.
@@ -122,6 +134,11 @@ async function liveRows({ sessionsDir, startReader, uidReader }, accept) {
 // features this build needs, in the directory the operator's table recorded, and not already the id
 // the table holds. Excluding the held id is what keeps this off the exact-match path — if that row
 // were live the caller would never be here.
+// The daemon registers itself in the same directory as a Claude session (it is the receiver Claude
+// replies to). Its row is never a successor (M2; seq 4305 had it as the only live candidate).
+export const SELF_ROW_NAME = "universal-peer-mcp";
+function isSelfRow(row, options = {}) { return row?.name === SELF_ROW_NAME || row?.pid === (options.selfPid ?? process.pid); }
+
 async function sameLaneRows(live, expected) {
   const shaped = live.filter(({ row }) => typeof row?.sessionId === "string"
     && row.sessionId !== expected.sessionId

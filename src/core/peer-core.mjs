@@ -11,6 +11,9 @@ import { resolveTarget, reverifyTarget } from "../adapters/claude-native-v1/regi
 import { normalizeProcStart, PROC_START_RENDERING } from "../adapters/claude-native-v1/darwin-procargs.mjs";
 import { encodeJsonAngles, outboundFrames, parseMarker, parseReplyHeader, senderEnvelope, unwrapEnvelope } from "../adapters/claude-native-v1/protocol.mjs";
 import { directSend } from "../adapters/claude-native-v1/transport.mjs";
+import { protocolHeader } from "./protocol-header.mjs";
+import { senderFields } from "./sender-auth.mjs";
+import { acceptPost, bodyDigest, quarantine } from "./posts.mjs";
 
 const INTERNAL_SEND = Symbol("universal-peer-mcp.internal-send");
 export function milestoneSendOptions(options = {}) { return Object.freeze({ [INTERNAL_SEND]: true, ...options }); }
@@ -27,7 +30,7 @@ export class PeerCore extends EventEmitter {
   // The capabilities a caller can ask about without constructing anything.
   static capabilities = CORE_CAPABILITIES;
 
-  constructor({ targets, store, address, resolver = resolveTarget, sender = directSend, resolverOptions = {}, onCorrelatedReply = null, inboundSpool = null, rebind = null }) {
+  constructor({ targets, store, address, resolver = resolveTarget, sender = directSend, resolverOptions = {}, onCorrelatedReply = null, inboundSpool = null, rebind = null, senderResolver = null }) {
     super(); this.targets = targets; this.store = store; this.address = address; this.resolver = resolver; this.sender = sender; this.resolverOptions = resolverOptions; this.sendLocks = new Map(); this.sendContext = new AsyncLocalStorage();
     // Succession is opt-in at construction and there is no default. A core built without it resolves
     // exactly as it always did — one id, one live row, or a refusal — because the half of succession
@@ -44,6 +47,11 @@ export class PeerCore extends EventEmitter {
     // it to a typo made months earlier is not a thing this should be capable of.
     if (onCorrelatedReply !== null && typeof onCorrelatedReply !== "function") throw codedError("INVALID_CORRELATED_REPLY_HOOK", "onCorrelatedReply must be a function");
     this.onCorrelatedReply = onCorrelatedReply;
+    // M2: who wrote an inbound frame (src/core/sender-auth.mjs). The shipped daemon always passes
+    // one; a core built without it records the writer's pid and treats nothing as authenticated
+    // or unauthenticated, which is the pre-M2 behaviour the older tests describe.
+    if (senderResolver !== null && typeof senderResolver !== "function") throw codedError("INVALID_SENDER_RESOLVER", "senderResolver must be a function");
+    this.senderResolver = senderResolver;
   }
 
   // The list under a name rather than the bare list: an array root is not a legal
@@ -225,11 +233,31 @@ export class PeerCore extends EventEmitter {
     // (`parseReplyHeader`); a line that satisfies neither is still not thrown away, because the
     // body is spooled before the outcome is decided.
     const marker = parseMarker(content) ?? parseReplyHeader(content);
-    if (!marker) return uncorrelated("no_reply_marker", await this.#spool(content));
+    // M2: every row names its writer, and a writer that is not one of our sessions keeps no body.
+    const auth = this.senderResolver ? await this.senderResolver(peer) : null;
+    const who = senderFields(peer, auth);
+    const unauthenticated = auth !== null && !auth.authenticated;
+    if (!marker) {
+      const header = protocolHeader(content);
+      if (header?.verb === "PEER_POST" && header.messageId) {
+        if (unauthenticated) { await quarantine(this.store, { reason: "sender_unauthenticated", content, header, who }); return null; }
+        await acceptPost({ store: this.store, spool: this.inboundSpool, messageId: header.messageId, body: content, who, source: "frame" });
+        return null;
+      }
+      if (unauthenticated) { await quarantine(this.store, { reason: "sender_unauthenticated", content, header, who }); return null; }
+      return uncorrelated("no_reply_marker", { ...await this.#spool(content), ...who });
+    }
     const resolved = this.#replyRequest(marker);
-    if (resolved.reason) return uncorrelated(resolved.reason, await this.#spool(content));
+    if (resolved.reason) {
+      if (unauthenticated) { await quarantine(this.store, { reason: resolved.reason, content, header: protocolHeader(content), who }); return null; }
+      return uncorrelated(resolved.reason, { ...await this.#spool(content), ...who });
+    }
     const request = resolved.request;
     this.#assertPeer(request, peer);
+    // A response that names the request's own id as its id is not an answer to it (d7e3473e,
+    // 2026-09-29): it is a copied line, and binding it would let any echo of a request ACK itself.
+    // Checked after the writer is proven to be the target, so a wrong writer is still refused first.
+    if (selfReferencing(marker)) return uncorrelated("self_referencing_response", { ...await this.#spool(content), ...who });
     const body = await this.#spool(content);
     // `messageId` is the id of the message being answered and is a uuid. The strict path records
     // the marker's own spelling of it, exactly as before; the in-band path records the row's,
@@ -451,7 +479,11 @@ export function frameObserver({ core, store, observers = [] }) {
       outcome = await core.acceptFrame(frame, peer);
       for (const observe of observers) if (await observe(frame, peer)) outcome = null;
     } catch (error) {
-      await store.append("peer_frame_refused", { ...context, reason: refusalReason(error), ...(typeof error?.messageId === "string" ? { messageId: error.messageId } : {}) }).catch(() => {});
+      // M2: a refused frame keeps no body but keeps its digest, length and writer, so a later
+      // authenticated copy can be matched to it.
+      let digest = {};
+      try { const content = unwrapEnvelope(frame?.message?.content, frame?.from); if (typeof content === "string" && content.length > 0) digest = bodyDigest(content); } catch {}
+      await store.append("peer_frame_refused", { ...context, reason: refusalReason(error), ...(typeof error?.messageId === "string" ? { messageId: error.messageId } : {}), ...digest, ...(Number.isInteger(peer?.pid) ? { peerPid: peer.pid } : {}) }).catch(() => {});
       throw error;
     }
     // The body reference travels with the reason. Without it the row says a frame arrived and
@@ -463,4 +495,9 @@ export function frameObserver({ core, store, observers = [] }) {
 // The cause travels as the code the thrower already set, lowercased. An error message is free
 // text and free text is not a cause, so anything without a code is one word.
 function refusalReason(error) { return typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(error.code) ? error.code.toLowerCase() : "frame_handler_failed"; }
+function selfReferencing(marker) {
+  const own = typeof marker?.messageId === "string" ? marker.messageId.toLowerCase().replace(/-/g, "") : "";
+  const target = typeof marker?.replyTo === "string" ? marker.replyTo.toLowerCase().replace(/-/g, "") : "";
+  return own.length > 0 && target.length >= 8 && own.startsWith(target);
+}
 function codedError(code, message) { const error = new Error(message); error.code = code; return error; }
