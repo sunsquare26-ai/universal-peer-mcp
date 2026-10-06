@@ -1,6 +1,6 @@
 {
   "name": "universal-peer-mcp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Codex가 실행 중인 Claude Code 세션과 직접 대화하게 해주는 로컬 MCP 서버",
   "license": "Apache-2.0",
   "author": "이형석",

@@ -197,7 +197,12 @@ const resolveCodex = createCodexResolver();
 // once more; unknown outcomes older than 30 minutes raise one alarm and are never resent.
 const doorbell = new DoorbellService({ store, root: paths.root, settings, codexPeers: () => codexPeers, claudePeers: () => targets, alerts,
   // The Claude half: the same native path peer_send uses, with the fixed line as the whole wire body.
-  sendClaude: ({ alias, messageId, threadId, line }) => core.send({ alias, messageId, threadId, kind: "doorbell", body: line }, milestoneSendOptions({ wireBody: line })) });
+  sendClaude: ({ alias, messageId, threadId, line, expectSessionId = null }) => {
+    // M5: the attempt names the session it is for; an alias that names another one by now is refused
+    // before anything is reserved or written.
+    if (expectSessionId && !sameUuid(targets[alias]?.sessionId ?? "", expectSessionId)) return Promise.reject(Object.assign(new Error("the alias names another session now"), { code: "WAKE_GENERATION_STALE" }));
+    return core.send({ alias, messageId, threadId, kind: "doorbell", body: line }, milestoneSendOptions({ wireBody: line, ...(expectSessionId ? { expectSessionId } : {}) }));
+  } });
 // M5 F0: a stuck message is reported to its sender, in the sender's own inbox (src/core/receipts.mjs).
 const receipts = new ReceiptService({ store, spool: inboundSpool });
 await receipts.enable();
@@ -629,7 +634,9 @@ async function peerOverview() {
   const started = store.events.find((e) => e.type === "daemon_started" && e.generationId === generationId);
   const presence = new Map(); for (const p of peers) if (p.kind === "claude") presence.set(p.alias, await claudeLiveness(p.sessionId));
   const index = doorbell.againIndex();
-  return overview({ events: store.events, peers, presence, eligible: (post) => doorbell.eligibleAgain(post, index),
+  // The held messages by id, so the hand that moves them has the exact command to type.
+  const heldIds = new Map(peers.filter((p) => p.heldForPreviousSession).map((p) => [p.alias, heldPosts(store.events, p.alias, lineageOf(p.kind === "claude" ? { kind: "claude", alias: p.alias, sessionId: p.sessionId } : { kind: "codex", alias: p.alias, threadId: p.threadId })).map((e) => e.messageId)]));
+  return overview({ events: store.events, peers, presence, eligible: (post) => doorbell.eligibleAgain(post, index), heldIds,
     held: new Map(peers.filter((p) => p.heldForPreviousSession).map((p) => [p.alias, p.heldForPreviousSession])),
     daemon: { pid: process.pid, buildId: BUILD_ID, startedAt: started?.at ?? null, previousEnd: started?.previousEnd ?? null } });
 }
@@ -641,7 +648,11 @@ async function relink(args, caller) {
   const post = store.events.find((e) => e.type === "peer_post" && e.messageId === args.messageId.toLowerCase());
   const peer = post ? resolvePeer(post.recipient, { claude: targets, codex: codexPeers }) : null;
   if (post && !peer) throw Object.assign(new Error(`${post.recipient} is not registered now`), { code: "UNKNOWN_RECIPIENT" });
-  return relinkPost(store, { messageId: args.messageId.toLowerCase(), identity: peer ?? { kind: "codex", threadId: null }, by: { relinkedByPid: caller?.pid } });
+  const result = await relinkPost(store, { messageId: args.messageId.toLowerCase(), identity: peer ?? { kind: "codex", threadId: null }, by: { relinkedByPid: caller?.pid } });
+  // M5: the session that holds the message now is told so, at once (measured 2026-10-06: a relinked
+  // answer sat unannounced in the new session's inbox).
+  const rung = await doorbell.ringRelinked(args.messageId.toLowerCase()).catch(() => null);
+  return { ...result, doorbell: rung?.state ?? null };
 }
 
 // "Receiver read" for M1: a body handed out inline to a caller process is a read by that process.

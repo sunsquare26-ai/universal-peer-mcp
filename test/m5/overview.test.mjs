@@ -17,10 +17,10 @@ const events = [
 test("observed facts only: presence, last activity, unprocessed, undelivered, held, unregistered", () => {
   const v = overview({ events, peers, presence: new Map([["c-1", "not_running"]]), eligible: () => true, now: NOW, held: new Map([["c-1", 2]]) });
   expect(v.peers).toEqual([
-    { alias: "c-1", kind: "claude", session: "11111111", present: "not_running", lastSeenAt: at(10), unprocessed: 1, oldestUnprocessedAt: at(30), undelivered: 1, uncertain: 0, autoRetry: 1, held: 2 },
-    { alias: "x-1", kind: "codex", session: "01a10000", present: "unknown", lastSeenAt: at(5), unprocessed: 1, oldestUnprocessedAt: at(1), undelivered: 0, uncertain: 0, autoRetry: 0, held: 0 }
+    { alias: "c-1", kind: "claude", session: "11111111", present: "not_running", lastSeenAt: at(10), unprocessed: 1, oldestUnprocessedAt: at(30), undelivered: 1, uncertain: 0, autoRetry: 1, held: 2, heldIds: [] },
+    { alias: "x-1", kind: "codex", session: "01a10000", present: "unknown", lastSeenAt: at(5), unprocessed: 1, oldestUnprocessedAt: at(1), undelivered: 0, uncertain: 0, autoRetry: 0, held: 0, heldIds: [] }
   ]);
-  expect(v.unregistered).toEqual([{ alias: "gone-1", unprocessed: 1, oldestUnprocessedAt: at(60) }]);
+  expect(v.unregistered).toEqual([{ alias: "gone-1", unprocessed: 1, oldestUnprocessedAt: at(60), ids: ["dddddddd-1111-4111-8111-111111111111"] }]);
 });
 test("the latest outcome decides: a re-ring that failed again still shows as not delivered (review P1)", () => {
   const more = [...events, { seq: 7, type: "doorbell_rering", at: at(2), messageId: A }, { seq: 8, type: "doorbell_outcome", at: at(2), messageId: A, state: "unknown" }];

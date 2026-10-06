@@ -30,7 +30,7 @@ import { sameUuid } from "./limits.mjs";
 export const RECEIPT_SENDER = "universal-peer";
 export const RECEIPT_SOURCE = "receipt";
 export const REPLY_GRACE_MS = 10 * 60 * 1000;
-const QUIET_CODES = new Set(["DOORBELL_NOT_CONFIGURED", "WAKE_ALREADY_PROCESSED"]);
+const QUIET_CODES = new Set(["DOORBELL_NOT_CONFIGURED", "WAKE_ALREADY_PROCESSED", "WAKE_GENERATION_STALE"]);
 
 const TEXT = {
   not_delivered: (post, code) => `[universal-peer 알림] 보낸 메시지 ${post.messageId} (받는 사람 ${post.recipient})의 자동 도착 알림을 보내지 못했습니다 (${code ?? "UNKNOWN"}). 상대가 이 메시지를 봤는지는 확인되지 않았고, 아직 처리 표시도 없습니다. 상대 세션이 꺼졌거나 연결이 끊겼을 수 있습니다. 답을 기다리며 멈춰 있지 말고, 하던 일을 계속하거나 사용자에게 알리세요. 같은 내용을 자동으로 다시 보내지는 마세요. 이 알림에는 답장하지 말고 읽은 뒤 inbox-ack 만 하세요.`,

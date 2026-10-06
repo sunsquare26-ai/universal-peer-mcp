@@ -134,7 +134,18 @@ export async function relinkPost(store, { messageId, identity, by = {} }) {
   if (!post) throw refuse("POST_UNKNOWN", "no accepted post with that id");
   if (store.events.some((e) => e.type === "peer_post_processed" && sameUuid(e.messageId, messageId))) throw refuse("ALREADY_PROCESSED", "already processed");
   const fields = identity.kind === "claude" ? { recipientSessionId: identity.sessionId } : { recipientThreadId: identity.threadId };
-  const row = await store.append("peer_post_relinked", { messageId, recipient: post.recipient, previous: postBindings(store.events).get(messageId) ?? null, ...fields, ...by });
+  // Moving a message to the session it is already bound to is not a move (M5): refused, so a relink
+  // row always means a new session and its doorbell is rung exactly once.
+  const target = bindingKey(identity.kind, identity.kind === "claude" ? identity.sessionId : identity.threadId);
+  // Decided inside the append (appendChecked), so two identical moves at once land as one relink and
+  // one ALREADY_BOUND, and a message processed meanwhile is not moved. `previous` is a diagnostic
+  // snapshot taken just before the append; under two concurrent different moves it may name the
+  // binding before the other move. Nothing decides on it.
+  const row = await store.appendChecked("peer_post_relinked", { messageId, recipient: post.recipient, previous: postBindings(store.events).get(messageId) ?? null, ...fields, ...by }, (events) => {
+    if (events.some((e) => e.type === "peer_post_processed" && sameUuid(e.messageId, messageId))) return refuse("ALREADY_PROCESSED", "already processed");
+    const current = postBindings(events).get(messageId);
+    return current && current === target ? refuse("ALREADY_BOUND", "the message is already bound to that session") : null;
+  });
   return { relinked: true, seq: row.seq, recipient: post.recipient };
 }
 

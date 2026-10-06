@@ -95,6 +95,10 @@ export class PeerCore extends EventEmitter {
       return { replay: true, messageId: args.messageId, requestHash, status: durableState(events), events };
     }
     const target = await this.#resolve(expected, args.alias);
+    // M5: a privileged send that names the session it is for (a doorbell attempt) is refused here,
+    // after the send lock and the resolve and before anything is reserved or written, if the alias
+    // resolves to another session now.
+    if (privileged && typeof internal.expectSessionId === "string" && !sameUuid(target.sessionId ?? "", internal.expectSessionId)) throw codedError("WAKE_GENERATION_STALE", "the alias resolves to another session than the attempt was for");
     const subscriptionId = crypto.randomUUID();
     const snapshot = targetSnapshot(args.alias, target);
     const reservation = await this.store.reserveRequest({ messageId: args.messageId, transportMessageId: args.messageId, threadId: args.threadId, replyTo: args.replyTo ?? null, kind: args.kind, alias: args.alias, requestHash, subscriptionId, ...snapshot });
