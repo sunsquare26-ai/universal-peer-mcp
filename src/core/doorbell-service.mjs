@@ -64,7 +64,7 @@ export class DoorbellService {
 
   // Host settings + the thread of this one post.
   targetFor(post) {
-    return { transport: "existing-app-server", cliPath: this.settings.codexCli.value, socketPath: this.settings.codexAppServerSocket.value, threadId: post.recipientThreadId, ...(this.settings.codexVersion?.value ? { codexVersion: this.settings.codexVersion.value } : {}) };
+    return { transport: "existing-app-server", cliPath: this.settings.codexCli.value, socketPath: this.settings.codexAppServerSocket.value, threadId: this.bindingOf(post), ...(this.settings.codexVersion?.value ? { codexVersion: this.settings.codexVersion.value } : {}) };
   }
 
   // Only a message in the daemon inbox, delivered to this alias and session/thread, not yet
@@ -73,14 +73,31 @@ export class DoorbellService {
     const post = this.post(messageId);
     if (!post) return "WAKE_UNKNOWN_MESSAGE";
     const codex = post.recipientKind === "codex";
-    const bound = codex ? post.recipientThreadId : post.recipientSessionId;
+    const bound = this.bindingOf(post);
     if (post.recipient !== alias || !["codex", "claude"].includes(post.recipientKind) || typeof bound !== "string") return "WAKE_NOT_RECIPIENT";
     if (this.processed(messageId)) return "WAKE_ALREADY_PROCESSED";
     const current = codex ? this.codexPeers()?.[alias]?.threadId : this.claudePeers()?.[alias]?.sessionId;
     if (!current || !sameUuid(current, bound)) return "WAKE_TARGET_MISMATCH";
     return true;
   }
-  bindingOf(post) { return post.recipientKind === "codex" ? post.recipientThreadId : post.recipientSessionId; }
+  // The session a post is bound to now: the accepted row's, or the Owner's latest relink
+  // (peer_post_relinked) — a relinked message is rung, authorized and woken at its new session.
+  // Relinks are read once per ledger length (the ledger only grows), so asking per post stays O(1).
+  #relinks() {
+    const length = this.store.events.length;
+    if (this.relinkCache?.length !== length) {
+      const map = new Map();
+      for (const e of this.store.events) if (e.type === "peer_post_relinked" && typeof e.messageId === "string") map.set(e.messageId.toLowerCase(), e);
+      this.relinkCache = { length, map };
+    }
+    return this.relinkCache.map;
+  }
+  bindingOf(post) {
+    const codex = post.recipientKind === "codex";
+    const relink = this.#relinks().get(String(post.messageId).toLowerCase());
+    const original = codex ? post.recipientThreadId : post.recipientSessionId;
+    return relink ? ((codex ? relink.recipientThreadId : relink.recipientSessionId) ?? original) : original;
+  }
 
   // Called for every appended row; acts on accepted posts for Codex peers.
   async onAppend(row) {
@@ -162,7 +179,7 @@ export class DoorbellService {
     if (!pin) return this.#record(post, "not_sent", { errorCode: "VERSION_UNKNOWN", via: "queue" });
     let version = null; try { version = await this.cliVersion(this.settings.codexCli.value); } catch {}
     if (version !== pin) return this.#record(post, "not_sent", { errorCode: "VERSION_MISMATCH", via: "queue" });
-    try { await this.enqueue({ cliPath: this.settings.codexCli.value, threadId: post.recipientThreadId, cwd: "/" }, doorbell(post.messageId)); }
+    try { await this.enqueue({ cliPath: this.settings.codexCli.value, threadId: this.bindingOf(post), cwd: "/" }, doorbell(post.messageId)); }
     catch (error) { return this.#record(post, code(error) === "INVALID_QUEUE_CALL" ? "not_sent" : "unknown", { errorCode: code(error), via: "queue" }); }
     return this.#record(post, "held", { mode: "held_behind_running_turn", via: "queue" });
   }
@@ -255,6 +272,14 @@ export class DoorbellService {
       if (sessionId && this.pendingNotSent(alias, sessionId).length && (await liveness(sessionId)) === "running") rung.push(...await this.ringAgain(alias, { binding: sessionId, trigger: "registry" }));
     }
     return rung;
+  }
+  // M5: the Owner moved a held message to the alias's current session — ring it there now, once
+  // (`doorbell_relink_ring` is the record), so the session that now holds it knows. Never the body.
+  async ringRelinked(messageId) {
+    const post = this.post(messageId); if (!post || this.processed(messageId)) return null;
+    try { await this.store.appendChecked("doorbell_relink_ring", { messageId: post.messageId, recipient: post.recipient, threadId: this.bindingOf(post) }, (events) => (events.some((e) => e.type === "peer_post_processed" && sameUuid(e.messageId, messageId)) ? Object.assign(new Error("processed"), { code: "DUP" }) : null)); }
+    catch (error) { if (error.code === "DUP") return null; throw error; }
+    return this.ring(post.messageId, {});
   }
   resumeOpenIntents() { return this.sweep(); }
   sweepUnknown() { return this.sweep().then((r) => r.alerted); }

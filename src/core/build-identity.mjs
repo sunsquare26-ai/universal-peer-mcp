@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 // This constant identifies the loaded release metadata, not every byte loaded by the runtime.
 // Startup/current digests are observations of disk, never proof of loaded module bytes.
-export const BUILD_ID = "20261006-m5-messenger-r15";
+export const BUILD_ID = "20261007-m5-messenger-r16";
 const SOURCE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export function sourceDigest(root = SOURCE_ROOT) {
   const rows = [];

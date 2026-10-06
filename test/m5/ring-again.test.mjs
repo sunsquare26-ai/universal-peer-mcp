@@ -120,3 +120,17 @@ test("MESSAGE_ID_CONFLICT on a Claude doorbell is recorded as unknown", async ()
   const row = await store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "c-1", recipientKind: "claude", recipientSessionId: S1 });
   expect((await service.ring(row.messageId, { first: true })).state).toBe("unknown");
 });
+
+test("a message the Owner relinks is rung at its new session, once (measured: a relinked answer sat unannounced)", async () => {
+  const s = await stand(); s.back();
+  const old = await s.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "c-1", recipientKind: "claude", recipientSessionId: S2 });
+  await s.service.ring(old.messageId, { first: true });
+  expect(s.rows("doorbell_outcome").at(-1)).toMatchObject({ state: "not_sent", errorCode: "WAKE_TARGET_MISMATCH" });
+  await s.store.append("peer_post_relinked", { messageId: old.messageId, recipient: "c-1", recipientSessionId: S1 });
+  expect(s.service.bindingOf(old)).toBe(S1);
+  expect((await s.service.ringRelinked(old.messageId)).state).toBe("sent");
+  expect(s.rows("doorbell_outcome").at(-1)).toMatchObject({ state: "sent", threadId: S1 });
+  await s.store.append("peer_post_processed", { messageId: old.messageId });
+  expect(await s.service.ringRelinked(old.messageId)).toBeNull();
+  expect(s.rows("doorbell_relink_ring")).toHaveLength(1);
+});

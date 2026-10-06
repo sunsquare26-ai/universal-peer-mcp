@@ -15,7 +15,7 @@
 //                the rest are exhausted or not eligible and need a hand.
 //   held         messages waiting for a previous session of this alias (only the Owner moves them).
 // Aliases no longer registered that still have unprocessed messages are listed under `unregistered`.
-export function overview({ events, peers, held = new Map(), presence = new Map(), eligible = () => false, now = Date.now(), daemon = null }) {
+export function overview({ events, peers, held = new Map(), heldIds = new Map(), presence = new Map(), eligible = () => false, now = Date.now(), daemon = null }) {
   const processed = new Set(); const lastOutcome = new Map(); const lastSeen = new Map();
   const seen = (alias, at) => { if (typeof alias === "string" && (!lastSeen.has(alias) || lastSeen.get(alias) < at)) lastSeen.set(alias, at); };
   for (const e of events) {
@@ -43,11 +43,13 @@ export function overview({ events, peers, held = new Map(), presence = new Map()
       present: peer.kind === "claude" ? (presence.get(peer.alias) ?? "unknown") : "unknown",
       lastSeenAt: lastSeen.get(peer.alias) ?? null,
       unprocessed: w.unprocessed, oldestUnprocessedAt: w.oldestAt, undelivered: w.undelivered, uncertain: w.uncertain, autoRetry: w.autoRetry,
-      held: held.get(peer.alias) ?? 0
+      held: held.get(peer.alias) ?? 0, heldIds: heldIds.get(peer.alias) ?? []
     };
   });
   const registered = new Set(peers.map((p) => p.alias));
-  const unregistered = [...waiting].filter(([alias]) => !registered.has(alias)).map(([alias, w]) => ({ alias, unprocessed: w.unprocessed, oldestUnprocessedAt: w.oldestAt }));
+  const unregisteredIds = new Map();
+  for (const e of events) if (e.type === "peer_post" && typeof e.recipient === "string" && e.recipient !== "*" && !registered.has(e.recipient) && !processed.has(e.messageId.toLowerCase())) unregisteredIds.set(e.recipient, [...(unregisteredIds.get(e.recipient) ?? []), e.messageId]);
+  const unregistered = [...waiting].filter(([alias]) => !registered.has(alias)).map(([alias, w]) => ({ alias, unprocessed: w.unprocessed, oldestUnprocessedAt: w.oldestAt, ids: unregisteredIds.get(alias) ?? [] }));
   return { at: new Date(now).toISOString(), daemon, peers: rows, unregistered };
 }
 
@@ -77,9 +79,16 @@ export function renderOverview(view, now = Date.now()) {
     if (p.autoRetry) notes.push(`- ${p.alias}: 알림이 못 간 메시지 ${p.autoRetry}건은 이 세션이 다시 무엇이든 실행하면 자동으로 한 번 더 알립니다.`);
     if (manual > 0 || p.uncertain) notes.push(`- ${p.alias}: 자동 재알림 대상이 아닌 미전달 ${manual}건${p.uncertain ? `, 전달 불확실 ${p.uncertain}건` : ""}. 세션을 열어 inbox 로 확인하세요: universal-peer-mcp open ${p.alias}`);
     else if (!p.autoRetry && p.unprocessed && p.present === "not_running") notes.push(`- ${p.alias}: 꺼져 있고 미처리 메시지 ${p.unprocessed}건. 열려면: universal-peer-mcp open ${p.alias}`);
-    if (p.held) notes.push(`- ${p.alias}: 이전 세션 앞으로 온 메시지 ${p.held}건이 보류 중. 새 세션으로 넘기려면 소유자 터미널에서: universal-peer-mcp link --post <messageId>`);
+    if (p.held) {
+      notes.push(`- ${p.alias}: 이전 세션 앞으로 온 메시지 ${p.held}건이 보류 중. 지금 세션으로 넘기려면 소유자 터미널에서 한 줄씩 실행하세요(넘기면 알림도 갑니다):`);
+      for (const id of (p.heldIds ?? []).slice(0, 5)) notes.push(`    universal-peer-mcp link --post ${id}`);
+      if ((p.heldIds ?? []).length > 5) notes.push(`    … 외 ${p.heldIds.length - 5}건 (universal-peer-mcp status --json 에 전부 있습니다)`);
+    }
   }
-  for (const u of view.unregistered ?? []) notes.push(`- ${u.alias}(등록 없음): 미처리 메시지 ${u.unprocessed}건 (가장 오래된 것 ${ago(u.oldestUnprocessedAt, now)}). 그 별칭을 다시 등록한 뒤, 소유자 터미널에서 universal-peer-mcp link --post <messageId> 로 넘기세요.`);
+  for (const u of view.unregistered ?? []) {
+    notes.push(`- ${u.alias}(등록 없음): 미처리 메시지 ${u.unprocessed}건 (가장 오래된 것 ${ago(u.oldestUnprocessedAt, now)}). 그 별칭을 다시 등록한 뒤, 소유자 터미널에서 한 줄씩:`);
+    for (const id of (u.ids ?? []).slice(0, 5)) notes.push(`    universal-peer-mcp link --post ${id}`);
+  }
   if (notes.length) lines.push("", "손볼 것:", ...notes);
   return `${lines.join("\n")}\n`;
 }
