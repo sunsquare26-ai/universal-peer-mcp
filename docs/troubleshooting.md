@@ -236,9 +236,9 @@ For the same reason, make the file the **first** check when confirming a round t
 the `messageId` in the receiving session's own transcript under
 `~/.claude/projects/<cwd slug>/<sessionId>.jsonl`.
 
-An older state directory can fail the same query for an unrelated reason: `connectionId` changed
-from a uuid to an integer, so events written by an earlier receiver do not satisfy the current
-public shape. A fresh state directory has none of them.
+Older UUID connection IDs and ordinal 0 no longer invalidate event queries: those internal
+fields are omitted while safe reasons remain visible. Keep the ledger and read every page
+using `hasMore` and `cursor`; creating a fresh state is not a repair for historical rows.
 
 ## Display name changed
 

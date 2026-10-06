@@ -86,6 +86,20 @@ export function processIdentity(pid = process.pid) {
   return { uid: renderedUid(match[1]), procStart: renderedProcStart(match[2]) };
 }
 
+// The pid that executed this one, read through the same pinned `ps` the two readers above use.
+// It exists for one caller: the succession proof, which has to look past the process a registry row
+// names to the one that launched it, because `claude --resume <id>` is on the launcher's command
+// line and the resumed session inherits none of it (src/core/session-rebind.mjs). It reads a number
+// and nothing else — a ppid is not an identity and nothing is decided on it here; what the proof
+// does with the pid is read its arguments, under the same rules as any other pid.
+export function processParent(pid = process.pid) {
+  assertPid(pid);
+  const text = execFileSync(PS, ["-ww", "-p", String(pid), "-o", "ppid="], psOptions());
+  const rendered = typeof text === "string" ? text.trim() : "";
+  if (!UID.test(rendered)) throw new Error("process parent unavailable");
+  return Number(rendered);
+}
+
 export function readProcessArgv(pid) {
   assertPid(pid);
   const argmax = readKernelInt([CTL_KERN, KERN_ARGMAX]);
@@ -97,6 +111,48 @@ export function readProcessArgv(pid) {
   const used = Number(size[0]);
   if (!Number.isSafeInteger(used) || used < 5 || used > argmax) throw new Error("target argv unavailable");
   return parseProcArgs(bytes.subarray(0, used));
+}
+
+// M4: the whole kernel copy of one exec — the path, argv and the environment the process was
+// started with — for the Codex identity proof (src/core/codex-identity.mjs). Unlike parseProcArgs
+// it does not require argv[0] to equal the exec path: a shell a host spawned may carry any argv[0],
+// and nothing here is a Claude target identity. Only the environment names asked for come back.
+export function readProcessImage(pid, names = []) {
+  assertPid(pid);
+  const argmax = readKernelInt([CTL_KERN, KERN_ARGMAX]);
+  if (!Number.isInteger(argmax) || argmax < 4096 || argmax > MAX_BYTES) throw new Error("process image unavailable");
+  const mib = new Int32Array([CTL_KERN, KERN_PROCARGS2, pid]);
+  const bytes = new Uint8Array(argmax);
+  const size = new BigUint64Array([BigInt(argmax)]);
+  if (system.symbols.sysctl(ptr(mib), mib.length, ptr(bytes), ptr(size), null, 0) !== 0) throw new Error("process image unavailable");
+  const used = Number(size[0]);
+  if (!Number.isSafeInteger(used) || used < 5 || used > argmax) throw new Error("process image unavailable");
+  return parseProcImage(bytes.subarray(0, used), names);
+}
+
+export function parseProcImage(bytes, names = []) {
+  if (!(bytes instanceof Uint8Array) || bytes.length < 5 || bytes.length > MAX_BYTES) throw new Error("process image unavailable");
+  const argc = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt32(0, true);
+  if (!Number.isInteger(argc) || argc < 1 || argc > MAX_ARGC) throw new Error("process image unavailable");
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const execEnd = bytes.indexOf(0, 4);
+  if (execEnd <= 4) throw new Error("process image unavailable");
+  const executable = decoder.decode(bytes.subarray(4, execEnd));
+  let cursor = execEnd;
+  while (cursor < bytes.length && bytes[cursor] === 0) cursor += 1;
+  const argv = [];
+  for (let index = 0; index < argc && cursor < bytes.length; index += 1) {
+    const end = bytes.indexOf(0, cursor); if (end < 0) break;
+    argv.push(decoder.decode(bytes.subarray(cursor, end))); cursor = end + 1;
+  }
+  const wanted = new Set(names); const env = {};
+  while (cursor < bytes.length) {
+    const end = bytes.indexOf(0, cursor); if (end <= cursor) break;
+    const entry = decoder.decode(bytes.subarray(cursor, end)); cursor = end + 1;
+    const at = entry.indexOf("=");
+    if (at > 0 && wanted.has(entry.slice(0, at)) && !(entry.slice(0, at) in env)) env[entry.slice(0, at)] = entry.slice(at + 1);
+  }
+  return { executable, argv, env };
 }
 
 export function parseProcArgs(bytes) {

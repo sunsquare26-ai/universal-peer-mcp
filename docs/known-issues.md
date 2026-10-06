@@ -1,5 +1,26 @@
 # Known issues
 
+## 0.1.1 repair status
+
+This candidate preserves the 09-11 body spool/inline path and adds bounded lifecycle cleanup,
+stable state-root reply addresses, explicit input/target diagnostics, build observations, paged
+event reads, and a first-line `|` body separator. See `test/diagnostics-regression.test.mjs`,
+`test/negative-control.test.mjs`, the receiver lifecycle/restart tests, and the fixed test logs
+shipped with the review result. These are candidate results, not a claim of live installation.
+
+Section 4's hidden-reason limitation is closed: safe reasons are public; historic UUID connection
+IDs and ordinal 0 are omitted and do not invalidate an event page. The target-table behavior in
+section 5 remains intentional and now reports a specific diagnostic. Section 7's previous
+new-state workaround is superseded by the same-state, immutable-prefix upgrade procedure.
+Build observations expose missing/mismatched versions; they do not attest loaded module bytes.
+
+A wait timeout and a socket hold timeout do not prove delivery failed. No automatic retransmit
+was added. The 1-second transport hold and fail-closed per-frame identity check remain; a later
+application ACK is collected by waiting again on the same message ID.
+
+The following historical analysis is retained with these corrections taking precedence.
+
+
 Nine things this package does not close, and — in §10 to §13 — four rounds of fault it closed on
 2026-09-07, kept here because the way the faults in them were found is the thing worth
 remembering. They are written down because a residual you can read is worth more than one you
@@ -173,10 +194,10 @@ on a normal install it is not in the tool list at all. So an installed daemon th
 running keeps running the code it started with, and the only way to retire it is to kill the
 process.
 
-The safe procedure is not to upgrade in place. Install the new version against a **new state
-directory** and leave the old daemon alone; see `INSTALL-SIDE-BY-SIDE.md` for the order and the
-two path constraints that will otherwise kill the new daemon silently. Two daemons on one machine
-do not share anything: state directory, socket, ledger and target table are all per-directory.
+Do not overwrite running program files. Install at an immutable versioned prefix while keeping
+the existing state and ledger, then verify a coordinated restart as described in
+`INSTALL-SIDE-BY-SIDE.md`. A separate diagnostic state is optional and does not migrate pending
+requests. `daemon_status` now exposes server/daemon build observations and disk changes.
 
 ## 8. The daemon registers itself as a session and shows up in your session list. **Unresolved.**
 

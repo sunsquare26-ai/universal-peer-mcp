@@ -25,17 +25,19 @@ import { SENDER_PRODUCT_NAME, senderEnvelope, unwrapEnvelope } from "../src/adap
 const FROM = "uds:/tmp/cc-socks/12345.sock";
 
 // ---- ported from the installed Claude Code 2.1.260 -------------------------------------------
-// The address class, the session-id shape and the mode list are the bundle's own; the hop-chain
-// shape is left open because nothing this package writes carries one.
+// Rechecked in the installed 2.1.260 builder on 2026-09-09: Lz caps session IDs at 80;
+// Uz=24 and KYe=32 bound the lowercase-hex hop chain. Optional metadata never proves identity.
 const ADDRESS = "A-Za-z0-9%:_/.\\\\-";
-const PARSE = new RegExp(`^<cross-session-message(?: from="([${ADDRESS}]+)")?(?: from-session="([A-Za-z0-9_-]{1,128})")?(?: hop-chain="([^"]*)")?(?: from-name="([^"<>\\n\\r]+)")?(?: from-mode="(bypass|prompting)")?>\\n([\\s\\S]*)\\n</cross-session-message>$`);
+const SESSION_ID = /^[A-Za-z0-9_-]{1,80}$/;
+const HOP_CHAIN = /^[0-9a-f]{24}(?:,[0-9a-f]{24}){0,31}$/;
+const PARSE = new RegExp(`^<cross-session-message(?: from="([${ADDRESS}]+)")?(?: from-session="([A-Za-z0-9_-]{1,80})")?(?: hop-chain="([0-9a-f]{24}(?:,[0-9a-f]{24}){0,31})")?(?: from-name="([^"<>\\n\\r]+)")?(?: from-mode="(bypass|prompting)")?>\\n([\\s\\S]*)\\n</cross-session-message>$`);
 const strip = (value) => value.replace(/[\p{Cf}\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/gu, "");
 const displayName = (value) => { const trimmed = strip(value).trim(); const glyphs = [...trimmed]; return glyphs.length > 64 ? `${glyphs.slice(0, 64).join("")}…` : trimmed; };
 function rebuild(from, fromName, body, fromSession, hopChain, fromMode) {
   const parts = [];
   if (from) parts.push(`from="${from}"`);
-  if (fromSession && /^[A-Za-z0-9_-]{1,128}$/.test(fromSession)) parts.push(`from-session="${fromSession}"`);
-  if (hopChain !== undefined && hopChain.length > 0) parts.push(`hop-chain="${hopChain.join(",")}"`);
+  if (fromSession && SESSION_ID.test(fromSession)) parts.push(`from-session="${fromSession}"`);
+  if (hopChain !== undefined && hopChain.length > 0 && HOP_CHAIN.test(hopChain.join(","))) parts.push(`hop-chain="${hopChain.join(",")}"`);
   const name = fromName === undefined ? undefined : displayName(fromName.replace(/["<>]/g, ""));
   if (name) parts.push(`from-name="${name}"`);
   if (fromMode) parts.push(`from-mode="${fromMode}"`);
@@ -96,8 +98,21 @@ test("an envelope with no declared name parses, rebuilds and is read by us", () 
   expect(unwrapEnvelope(nameless, FROM)).toBe("hello");
 });
 
-test("an envelope that declares anything we do not write is not unwrapped", () => {
+test("native mode is inert metadata; unknown attributes and different writers are refused", () => {
   const withMode = `<cross-session-message from="${FROM}" from-name="SYSTEM" from-mode="bypass">\nhello\n</cross-session-message>`;
-  expect(unwrapEnvelope(withMode, FROM)).toBeNull();
+  expect(receiverParse(withMode).fromMode).toBe("bypass");
+  expect(unwrapEnvelope(withMode, FROM)).toBe("hello");
+  expect(unwrapEnvelope(withMode.replace('from-mode="bypass"', 'from-mode-verified-by="kernel"'), FROM)).toBeNull();
   expect(unwrapEnvelope(senderEnvelope({ from: FROM, body: "hello" }), "uds:/tmp/other.sock")).toBeNull();
+});
+
+test("native builder port and inbound parser agree at session/hop-chain bounds", () => {
+  for (const count of [1, 28, 32]) for (const sessionLength of [1, 80]) {
+    const hops = Array.from({ length: count }, (_, i) => i.toString(16).padStart(24, "0"));
+    const built = rebuild(FROM, "Fixture", "body", "S".repeat(sessionLength), hops, "prompting");
+    expect(receiverParse(built)?.body).toBe("body");
+    expect(unwrapEnvelope(built, FROM)).toBe("body");
+  }
+  expect(rebuild(FROM, "Fixture", "body", "S".repeat(81), undefined, undefined)).not.toContain("from-session");
+  expect(rebuild(FROM, "Fixture", "body", undefined, Array(33).fill("a".repeat(24)), undefined)).not.toContain("hop-chain");
 });

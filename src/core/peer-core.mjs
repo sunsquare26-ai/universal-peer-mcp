@@ -2,12 +2,18 @@ import crypto from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { EventEmitter } from "node:events";
 import { canonicalSend, sha256 } from "./dedupe.mjs";
+import { referenceMatches, requireUuid, sameUuid } from "./limits.mjs";
 import { waitForEvent } from "./wait.mjs";
 import { permissionRecord, publicTarget } from "./target-config.mjs";
+import { satisfies, waitEvidence } from "./wait-requirements.mjs";
+import { targetDiagnostic } from "./target-diagnostics.mjs";
 import { resolveTarget, reverifyTarget } from "../adapters/claude-native-v1/registry.mjs";
 import { normalizeProcStart, PROC_START_RENDERING } from "../adapters/claude-native-v1/darwin-procargs.mjs";
-import { encodeJsonAngles, outboundFrames, parseMarker, senderEnvelope, unwrapEnvelope } from "../adapters/claude-native-v1/protocol.mjs";
+import { encodeJsonAngles, outboundFrames, parseMarker, parseReplyHeader, senderEnvelope, unwrapEnvelope } from "../adapters/claude-native-v1/protocol.mjs";
 import { directSend } from "../adapters/claude-native-v1/transport.mjs";
+import { protocolHeader } from "./protocol-header.mjs";
+import { senderFields } from "./sender-auth.mjs";
+import { acceptPost, bodyDigest, postRecipient, quarantine } from "./posts.mjs";
 
 const INTERNAL_SEND = Symbol("universal-peer-mcp.internal-send");
 export function milestoneSendOptions(options = {}) { return Object.freeze({ [INTERNAL_SEND]: true, ...options }); }
@@ -24,13 +30,31 @@ export class PeerCore extends EventEmitter {
   // The capabilities a caller can ask about without constructing anything.
   static capabilities = CORE_CAPABILITIES;
 
-  constructor({ targets, store, address, resolver = resolveTarget, sender = directSend, resolverOptions = {}, onCorrelatedReply = null }) {
+  constructor({ targets, store, address, resolver = resolveTarget, sender = directSend, resolverOptions = {}, onCorrelatedReply = null, inboundSpool = null, rebind = null, senderResolver = null, postRecipientFields = null }) {
     super(); this.targets = targets; this.store = store; this.address = address; this.resolver = resolver; this.sender = sender; this.resolverOptions = resolverOptions; this.sendLocks = new Map(); this.sendContext = new AsyncLocalStorage();
+    // Succession is opt-in at construction and there is no default. A core built without it resolves
+    // exactly as it always did — one id, one live row, or a refusal — because the half of succession
+    // that cannot live in here is the half that rewrites the operator's table, and a core that was
+    // handed no way to do that must not pretend a session moved.
+    if (rebind !== null && typeof rebind !== "function") throw codedError("INVALID_REBINDER", "rebind must be a function");
+    this.rebind = rebind;
+    // Where an inbound body is kept. It is not the hook below and does not replace it: the hook is
+    // called for a correlated reply only, and a body has to survive the frames that correlate to
+    // nothing as well, which is most of them (src/core/inbound-spool.mjs).
+    this.inboundSpool = inboundSpool;
     // A hook that is not callable is refused here rather than at the first reply. The frame that
     // would have found out is one that arrived correctly and was correlated correctly, and losing
     // it to a typo made months earlier is not a thing this should be capable of.
     if (onCorrelatedReply !== null && typeof onCorrelatedReply !== "function") throw codedError("INVALID_CORRELATED_REPLY_HOOK", "onCorrelatedReply must be a function");
     this.onCorrelatedReply = onCorrelatedReply;
+    // M2: who wrote an inbound frame (src/core/sender-auth.mjs). The shipped daemon always passes
+    // one; a core built without it records the writer's pid and treats nothing as authenticated
+    // or unauthenticated, which is the pre-M2 behaviour the older tests describe.
+    if (senderResolver !== null && typeof senderResolver !== "function") throw codedError("INVALID_SENDER_RESOLVER", "senderResolver must be a function");
+    this.senderResolver = senderResolver;
+    // M4: which session a frame's `to=<alias>` names at the moment it is accepted (the daemon's
+    // directory). A post is bound to that session, not to the name (src/core/posts.mjs).
+    this.postRecipientFields = typeof postRecipientFields === "function" ? postRecipientFields : null;
   }
 
   // The list under a name rather than the bare list: an array root is not a legal
@@ -39,7 +63,7 @@ export class PeerCore extends EventEmitter {
   targetsList() { return { targets: Object.entries(this.targets).map(([alias, target]) => ({ alias, ...publicTarget(target) })) }; }
 
   async status(alias) {
-    const expected = this.#target(alias); const target = await this.#resolve(expected);
+    const expected = this.#target(alias); const target = await this.#resolve(expected, alias);
     if (expected.expectedDisplayName && expected.expectedDisplayName !== target.observedDisplayName) {
       const event = await this.store.append("display_name_observed", { alias, expected: expected.expectedDisplayName, observed: target.observedDisplayName }); this.emit("event", event);
     }
@@ -47,6 +71,9 @@ export class PeerCore extends EventEmitter {
   }
 
   async send(args, internal = null) {
+    // Normalize before locking, reserving or emitting; canonicalSend already hashes these IDs
+    // in lowercase. Preserve the caller's object and read historic rows without migrating them.
+    args = { ...args, messageId: requireUuid(args.messageId, "messageId"), threadId: requireUuid(args.threadId, "threadId"), replyTo: args.replyTo == null ? null : requireUuid(args.replyTo, "replyTo") };
     if (this.sendContext.getStore() === args.messageId) throw codedError("INTERNAL_SEND_REENTRANT", "a send reservation callback cannot re-enter the same messageId");
     const preceding = this.sendLocks.get(args.messageId) ?? Promise.resolve();
     const current = preceding.catch(() => {}).then(() => this.sendContext.run(args.messageId, () => this.#sendOnce(args, internal)));
@@ -67,7 +94,7 @@ export class PeerCore extends EventEmitter {
       const events = this.store.list({ messageId: args.messageId });
       return { replay: true, messageId: args.messageId, requestHash, status: durableState(events), events };
     }
-    const target = await this.#resolve(expected);
+    const target = await this.#resolve(expected, args.alias);
     const subscriptionId = crypto.randomUUID();
     const snapshot = targetSnapshot(args.alias, target);
     const reservation = await this.store.reserveRequest({ messageId: args.messageId, transportMessageId: args.messageId, threadId: args.threadId, replyTo: args.replyTo ?? null, kind: args.kind, alias: args.alias, requestHash, subscriptionId, ...snapshot });
@@ -91,7 +118,7 @@ export class PeerCore extends EventEmitter {
     const content = senderEnvelope({ from: this.address, body });
     const frames = outboundFrames({ token: target.token, targetSessionId: target.sessionId, senderAddress: this.address, messageId: args.messageId, subscriptionId, content });
     try {
-      const result = await this.sender(target, frames, { reverify: () => reverifyTarget(target, expected, this.resolverOptions) });
+      const result = await this.sender(target, frames, { reverify: () => reverifyTarget(target, boundExpectation(expected, target), this.resolverOptions) });
       const sent = await this.store.append("socket_write_complete", { messageId: args.messageId, transportMessageId: args.messageId, subscriptionId, alias: args.alias, bytesWritten: result.bytesWritten }); this.emit("event", sent);
     } catch (error) {
       const failed = await this.store.append("send_failed", { messageId: args.messageId, subscriptionId, alias: args.alias, errorCode: error.code ?? "SEND_FAILED" }); this.emit("event", failed);
@@ -103,7 +130,7 @@ export class PeerCore extends EventEmitter {
   async #recoverSend(args, canonical, requestHash, prior, internal) {
     const events = this.store.list({ messageId: args.messageId });
     if (events.some((event) => event.type === "peer_terminal_failure")) throw codedError("RECOVERY_FORBIDDEN", "terminal messages cannot be recovered");
-    const expected = this.#target(args.alias); const target = await this.#resolve(expected); const snapshot = targetSnapshot(args.alias, target);
+    const expected = this.#target(args.alias); const target = await this.#resolve(expected, args.alias); const snapshot = targetSnapshot(args.alias, target);
     assertSameSnapshot(prior, snapshot);
     const transportMessageId = crypto.randomUUID(); const subscriptionId = crypto.randomUUID();
     const reservation = await this.store.reserveRecovery({ messageId: args.messageId, transportMessageId, subscriptionId, requestHash, alias: args.alias, ...snapshot });
@@ -120,7 +147,7 @@ export class PeerCore extends EventEmitter {
     const content = senderEnvelope({ from: this.address, body });
     const frames = outboundFrames({ token: target.token, targetSessionId: target.sessionId, senderAddress: this.address, messageId: transportMessageId, subscriptionId, content });
     try {
-      const result = await this.sender(target, frames, { reverify: () => reverifyTarget(target, expected, this.resolverOptions) });
+      const result = await this.sender(target, frames, { reverify: () => reverifyTarget(target, boundExpectation(expected, target), this.resolverOptions) });
       const sent = await this.store.append("socket_write_complete", { messageId: args.messageId, transportMessageId, subscriptionId, alias: args.alias, bytesWritten: result.bytesWritten }); this.emit("event", sent);
     } catch (error) {
       const failed = await this.store.append("send_failed", { messageId: args.messageId, transportMessageId, subscriptionId, alias: args.alias, errorCode: error.code ?? "SEND_FAILED" }); this.emit("event", failed);
@@ -130,18 +157,49 @@ export class PeerCore extends EventEmitter {
   }
 
   async wait({ messageId, require = "reply", timeoutMs = 30_000 }) {
-    const wanted = { ack: "peer_ack", reply: "peer_reply", idle: "peer_idle_notice", delivery: "peer_message_status", terminal: "peer_terminal_failure" }[require];
-    if (!wanted) throw new Error("invalid wait requirement");
+    // What satisfies this requirement is read from one table (src/core/wait-requirements.mjs) rather
+    // than named here as one event type. A reply is stronger evidence than an ACK and now answers a
+    // wait for one; the reverse does not, and the reason both halves are true is written there.
+    const accepted = waitEvidence(require);
+    if (!accepted) throw new Error("invalid wait requirement");
     const find = () => {
       const events = this.store.list({ messageId });
-      const event = events.find((entry) => entry.type === wanted && (require !== "delivery" || entry.status === "delivered"));
+      const event = events.find((entry) => satisfies(accepted, entry));
       return event ? { event, events, evidence: event.evidence ?? null } : null;
     };
-    const timedOut = () => { const events = this.store.list({ messageId }); return { timedOut: true, messageId, require, state: durableState(events), events }; };
+    const startedAt = Date.now();
+    // An expiry is a diagnosis and it used to be told to the caller and to nobody else: this
+    // function returned a timeout object and never appended anything, so the ledger — the thing a
+    // person reads afterwards to find out what happened — showed zero timeouts while 34 of them had
+    // occurred across two days (20 distinct message ids, 2026-09-10/11). A silent expiry is
+    // indistinguishable from a wait that was never made.
+    //
+    // The rows the answer carries are read before the line is written, so the expiry does not appear
+    // inside the evidence it is reporting on, and the append cannot fail the wait: a caller told
+    // nothing because the ledger is wedged is the failure this line exists to end.
+    const timedOut = async () => {
+      const events = this.store.list({ messageId });
+      const state = durableState(events);
+      await this.store.append("peer_wait_timed_out", { messageId, require, state, waitedMs: Date.now() - startedAt, timeoutMs })
+        .then((event) => this.emit("event", event)).catch(() => {});
+      return { timedOut: true, timeoutScope: "application_wait", nextAction: "wait_same_message_id", messageId, require, state, events };
+    };
     return waitForEvent(this, find, timeoutMs, timedOut);
   }
 
-  events(args) { return { cursor: this.store.events.at(-1)?.seq ?? 0, events: this.store.list(args) }; }
+  events(args = {}) {
+    const limit = args.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("event page limit must be between 1 and 1000");
+    const matching = this.store.list(args); const events = []; let bytes = 0;
+    for (const event of matching) {
+      const size = Buffer.byteLength(JSON.stringify(event)) + 1;
+      if (events.length >= limit || bytes + size > 512 * 1024) break;
+      events.push(event); bytes += size;
+    }
+    const hasMore = events.length < matching.length;
+    const cursor = hasMore ? (events.at(-1)?.seq ?? args.afterSeq ?? 0) : (this.store.events.at(-1)?.seq ?? 0);
+    return { cursor, hasMore, events };
+  }
 
   // A frame ends in one of three places and the caller is told which: taken (null), arrived and
   // matched nothing this daemon is waiting for (a reason), or written by a process that is not
@@ -173,12 +231,79 @@ export class PeerCore extends EventEmitter {
     // off first, with the one reader the extensions use (`unwrapEnvelope`), and an unwrapped
     // message goes through unchanged.
     const content = unwrapEnvelope(frame?.message?.content, frame?.from);
-    const marker = parseMarker(content); if (!marker) return uncorrelated("no_reply_marker");
-    const request = this.store.request(marker.replyTo); if (!request || request.threadId !== marker.threadId) return uncorrelated("unknown_reply_target");
+    // Two readers, strict first, so a frame that parses today parses identically today. The
+    // second one is for a sender with no correlation parameter to fill in
+    // (`parseReplyHeader`); a line that satisfies neither is still not thrown away, because the
+    // body is spooled before the outcome is decided.
+    const marker = parseMarker(content) ?? parseReplyHeader(content);
+    // M2: every row names its writer, and a writer that is not one of our sessions keeps no body.
+    const auth = this.senderResolver ? await this.senderResolver(peer) : null;
+    const who = senderFields(peer, auth);
+    const unauthenticated = auth !== null && !auth.authenticated;
+    if (!marker) {
+      const header = protocolHeader(content);
+      if (header?.verb === "PEER_POST" && header.messageId) {
+        if (unauthenticated) { await quarantine(this.store, { reason: "sender_unauthenticated", content, header, who }); return null; }
+        const recipient = postRecipient(content);
+        await acceptPost({ store: this.store, spool: this.inboundSpool, messageId: header.messageId, recipient, body: content, who: { ...who, ...(recipient !== "*" ? this.postRecipientFields?.(recipient) ?? {} : {}) }, source: "frame" });
+        return null;
+      }
+      if (unauthenticated) { await quarantine(this.store, { reason: "sender_unauthenticated", content, header, who }); return null; }
+      return uncorrelated("no_reply_marker", { ...await this.#spool(content), ...who });
+    }
+    const resolved = this.#replyRequest(marker);
+    if (resolved.reason) {
+      if (unauthenticated) { await quarantine(this.store, { reason: resolved.reason, content, header: protocolHeader(content), who }); return null; }
+      return uncorrelated(resolved.reason, { ...await this.#spool(content), ...who });
+    }
+    const request = resolved.request;
     this.#assertPeer(request, peer);
-    const event = await this.store.append(marker.type === "ack" ? "peer_ack" : "peer_reply", { messageId: marker.replyTo, responseMessageId: marker.messageId, threadId: marker.threadId, verdict: marker.verdict, evidence: "application_ack", peerPid: peer.pid, peerProcStart: peer.procStart }); this.emit("event", event);
-    await this.#correlatedReply(request, marker, peer, content);
+    // A response that names the request's own id as its id is not an answer to it (d7e3473e,
+    // 2026-09-29): it is a copied line, and binding it would let any echo of a request ACK itself.
+    // Checked after the writer is proven to be the target, so a wrong writer is still refused first.
+    if (selfReferencing(marker)) return uncorrelated("self_referencing_response", { ...await this.#spool(content), ...who });
+    const body = await this.#spool(content);
+    // `messageId` is the id of the message being answered and is a uuid. The strict path records
+    // the marker's own spelling of it, exactly as before; the in-band path records the row's,
+    // because what that path carried was a reference and a reference is not an id.
+    const event = await this.store.append(marker.type === "ack" ? "peer_ack" : "peer_reply", {
+      messageId: marker.style === "inband_header" ? request.messageId : marker.replyTo,
+      // An id the sender did not state is not written. `responseMessageId` is the peer's own id
+      // for its reply (docs/correlated-reply-hook.md), so minting one here and recording it under
+      // that name would be this daemon's number wearing the peer's label.
+      ...(marker.messageId === null || marker.messageId === undefined ? {} : { responseMessageId: marker.messageId }),
+      threadId: request.threadId, verdict: marker.verdict,
+      evidence: marker.style === "inband_header" ? "inband_header" : "application_ack",
+      peerPid: peer.pid, peerProcStart: peer.procStart, ...body
+    }); this.emit("event", event);
+    await this.#correlatedReply(request, { ...marker, messageId: marker.messageId ?? null, threadId: request.threadId }, peer, content);
     return null;
+  }
+
+  // The two correlations, kept apart on purpose. The strict marker names a full id and a full
+  // thread and both are checked exactly as they were before this existed. The in-band header names
+  // a reference, which is resolved against this ledger's own rows, and names a thread only if it
+  // chose to — an absent thread is not a failed check, because the reference already bound the
+  // request and the request carries the thread.
+  #replyRequest(marker) {
+    if (marker.style !== "inband_header") {
+      const request = this.store.request(marker.replyTo);
+      if (!request || !sameUuid(request.threadId, marker.threadId)) return { reason: "unknown_reply_target" };
+      return { request };
+    }
+    const resolved = this.store.requestByReference(marker.replyTo);
+    if (resolved.ambiguous) return { reason: "ambiguous_reply_reference" };
+    if (!resolved.request) return { reason: "unknown_reply_target" };
+    if (marker.threadId !== null && !referenceMatches(resolved.request.threadId, marker.threadId)) return { reason: "reply_thread_mismatch" };
+    return { request: resolved.request };
+  }
+
+  // Called on the reply branch, where a body exists, and before the frame's fate is decided, so
+  // the text is kept whether or not it correlates. A spool that fails does not cost the frame: the
+  // row is written with no body reference on it and therefore claims none.
+  async #spool(content) {
+    if (!this.inboundSpool || typeof content !== "string" || content.length === 0) return {};
+    try { return await this.inboundSpool.write(content); } catch { return { bodyStorageOmitted: "write_failed" }; }
   }
 
   // Called for a reply that was authenticated and correlated, and for nothing else. That is the
@@ -224,7 +349,35 @@ export class PeerCore extends EventEmitter {
   // refused send from leaving a ledger row behind it.
   assertTarget(alias) { this.#target(alias); }
 
-  async #resolve(expected) { try { return await this.resolver(expected, this.resolverOptions); } catch { throw codedError("TARGET_UNAVAILABLE", "target is unavailable"); } }
+  // The refusal was always loud and still is — this throws, and it throws before anything is
+  // reserved, so a send against a target that is gone leaves no row to replay from. What it was
+  // not is named: every way a target can fail to resolve arrived as one TARGET_UNAVAILABLE, so
+  // "the session id in targets.json is not running any more" read exactly like "the cwd moved"
+  // and like "the argv proof failed". Which check failed is recorded here, from a closed list and
+  // with no path or message in it. The row carries no messageId: it is a diagnosis and not a
+  // send, and nothing replays from it.
+  async #resolve(expected, alias = null) {
+    try { return await this.resolver(expected, this.resolverOptions); }
+    catch (error) {
+      const diagnostic = resolveReason(error);
+      // One failure gets a second question asked about it, and only one: nothing live is advertising
+      // the id the table holds. That is what a resumed session looks like from here, and it is the
+      // only failure where a *different* live session can be the right answer. Every other one —
+      // the directory moved, the socket is not private, the permission mode cannot be proven — is
+      // about the session that is there, and looking at another session answers none of them.
+      if (diagnostic === "no_live_session_for_session_id" && alias !== null && this.rebind) {
+        try { return await this.rebind({ alias, expected, options: this.resolverOptions }); }
+        catch (rebound) { throw await this.#unavailable(alias, rebindReason(rebound, diagnostic), rebound?.rebindFailedSeq); }
+      }
+      throw await this.#unavailable(alias, diagnostic);
+    }
+  }
+
+  async #unavailable(alias, diagnostic, rebindFailedSeq = null) {
+    await this.store.append("target_resolve_failed", { ...(alias === null ? {} : { alias }), reason: diagnostic, ...(Number.isInteger(rebindFailedSeq) ? { rebindFailedSeq } : {}) })
+      .then((event) => this.emit("event", event)).catch(() => {});
+    return Object.assign(codedError("TARGET_UNAVAILABLE", "target is unavailable"), { diagnostic });
+  }
 
   #target(alias) { const target = this.targets[alias]; if (!target) throw codedError("TARGET_UNAVAILABLE", `target alias is not allowlisted: ${alias}`); return target; }
 }
@@ -268,7 +421,51 @@ function durableState(events) {
   if (events.some((event) => event.type === "send_requested")) return "requested";
   return "unknown";
 }
-function uncorrelated(reason) { return { reason }; }
+function uncorrelated(reason, detail = {}) { return { reason, ...detail }; }
+
+// The expectation a re-verify is held against. A send resolves its target once and checks it again
+// immediately before the socket write, and that second check re-runs the resolver against what the
+// operator's table said. When a succession happened in between, the table said an id that is no
+// longer live and the re-verify would refuse the very target the send just proved. So the second
+// check is made against the id that answered, and against the identical expectation object when
+// nothing moved — the frozen row itself, not a copy of it.
+function boundExpectation(expected, target) {
+  return expected.sessionId === target.sessionId ? expected : Object.freeze({ ...expected, sessionId: target.sessionId });
+}
+
+// Why a succession attempt did not produce a target. A refusal that path recognises names itself;
+// anything else is an ordinary resolver failure and is read from the same closed list every other
+// one is read from. A failure nothing recognises keeps the diagnosis the caller already had, which
+// is the true one: the id in the table is not live.
+function rebindReason(error, fallback) {
+  const named = targetDiagnostic(error?.diagnostic);
+  if (named) return named;
+  const read = resolveReason(error);
+  return read === "unrecognised_resolver_failure" ? fallback : read;
+}
+
+// The resolver's own messages, read down to a closed list. They are never republished as they
+// are: `realpath` names a directory in its ENOENT, so the message is not always a string this
+// package wrote. What is published is which check failed, and a failure this list does not know is
+// published as exactly that rather than as one of the ones it does.
+const RESOLVE_REASONS = [
+  [/resolved to 0 live candidates/, "no_live_session_for_session_id"],
+  [/resolved to \d+ live candidates/, "multiple_live_sessions_for_session_id"],
+  [/target cwd mismatch/, "cwd_mismatch"],
+  [/unsupported Claude peer protocol/, "unsupported_peer_protocol"],
+  [/target process identity changed/, "process_identity_changed"],
+  [/target socket is not private/, "socket_not_private"],
+  [/target key is not private/, "key_not_private"],
+  [/target key identity mismatch/, "key_identity_mismatch"],
+  [/target argv executable mismatch/, "argv_executable_mismatch"],
+  [/permission mode argv cannot be proven/, "permission_mode_unproven"],
+  [/Claude sessions directory is not private/, "sessions_directory_not_private"]
+];
+function resolveReason(error) {
+  const message = typeof error?.message === "string" ? error.message : "";
+  for (const [pattern, reason] of RESOLVE_REASONS) if (pattern.test(message)) return reason;
+  return "unrecognised_resolver_failure";
+}
 
 // The daemon's frame handler, exported so that what the daemon runs is what a test can run.
 // core first and then the observers, and the ledger gets a line for every frame that did not end
@@ -286,14 +483,25 @@ export function frameObserver({ core, store, observers = [] }) {
       outcome = await core.acceptFrame(frame, peer);
       for (const observe of observers) if (await observe(frame, peer)) outcome = null;
     } catch (error) {
-      await store.append("peer_frame_refused", { ...context, reason: refusalReason(error), ...(typeof error?.messageId === "string" ? { messageId: error.messageId } : {}) }).catch(() => {});
+      // M2: a refused frame keeps no body but keeps its digest, length and writer, so a later
+      // authenticated copy can be matched to it.
+      let digest = {};
+      try { const content = unwrapEnvelope(frame?.message?.content, frame?.from); if (typeof content === "string" && content.length > 0) digest = bodyDigest(content); } catch {}
+      await store.append("peer_frame_refused", { ...context, reason: refusalReason(error), ...(typeof error?.messageId === "string" ? { messageId: error.messageId } : {}), ...digest, ...(Number.isInteger(peer?.pid) ? { peerPid: peer.pid } : {}) }).catch(() => {});
       throw error;
     }
-    if (outcome?.reason) await store.append("peer_frame_uncorrelated", { ...context, reason: outcome.reason });
+    // The body reference travels with the reason. Without it the row says a frame arrived and
+    // matched nothing, and the text it arrived with is gone — which is the whole defect.
+    if (outcome?.reason) { const { reason, ...detail } = outcome; await store.append("peer_frame_uncorrelated", { ...context, reason, ...detail }); }
   };
 }
 
 // The cause travels as the code the thrower already set, lowercased. An error message is free
 // text and free text is not a cause, so anything without a code is one word.
 function refusalReason(error) { return typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(error.code) ? error.code.toLowerCase() : "frame_handler_failed"; }
+function selfReferencing(marker) {
+  const own = typeof marker?.messageId === "string" ? marker.messageId.toLowerCase().replace(/-/g, "") : "";
+  const target = typeof marker?.replyTo === "string" ? marker.replyTo.toLowerCase().replace(/-/g, "") : "";
+  return own.length > 0 && target.length >= 8 && own.startsWith(target);
+}
 function codedError(code, message) { const error = new Error(message); error.code = code; return error; }

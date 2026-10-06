@@ -1,8 +1,8 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { assertPrivateFile } from "./state-paths.mjs";
+import { assertPrivateFile, atomicPrivateWrite } from "./state-paths.mjs";
 import { sha256 } from "./dedupe.mjs";
-import { plainObject, requireUuid } from "./limits.mjs";
+import { plainObject, requireUuid, sameUuid } from "./limits.mjs";
 
 const ALIAS = /^[a-z][a-z0-9-]{1,47}$/;
 const MODES = ["prompting", "bypass"];
@@ -76,6 +76,56 @@ export async function loadTargets(file) {
     result[alias] = Object.freeze({ sessionId: requireUuid(raw.sessionId, "sessionId"), cwd, expectedDisplayName: raw.expectedDisplayName ?? null, permissionMode: raw.permissionMode });
   }
   return Object.freeze(result);
+}
+
+// Point one alias at the session that proved it resumed the one the table names, in place, without
+// a restart and without a person editing the file.
+//
+// One field is touched and it is a field every build of this package already reads: `sessionId`. The
+// record of what the alias used to point at is deliberately *not* written here — it goes in a file
+// beside this one (src/core/rebind-sidecar.mjs). A table is read by whichever build is installed,
+// and `loadTargets` above refuses a field it does not know: a history field written here would make
+// this table unreadable to an older build, which does not fail as a bad row — `src/server.mjs`
+// reads an unparseable table as no table, so every alias in it stops being advertised at once.
+// Rolling the code back would then not roll the failure back, because the file would still carry
+// the field. Keeping the table to fields the old build knows is what makes this change reversible
+// and what lets a mixed pair of processes keep running while one of them is replaced.
+//
+// The whole file is rewritten because one row inside it changed, and it is rewritten through a
+// temporary file and a rename, so a reader sees the table before or the table after and never a
+// half-written one. The mode the operator gave the file is carried over — this package did not
+// create `targets.json` and does not decide what it is readable by — and fields it does not know
+// are copied through untouched.
+//
+// It is idempotent, and it is serialized against itself. One send resolves its target and then
+// re-verifies it before the socket write, so a succession inside a single send is proven twice and
+// the second call must change nothing. Two sends to two aliases can succeed at the same moment, and
+// read-modify-write is not safe against itself: both would read the table before either wrote, and
+// the second rename would drop the first alias's repair. The queue below is per file and per
+// process, which is the scope that matters — one daemon owns one table.
+export async function rebindTargetSessionId(file, alias, nextSessionId, { maxPrevious } = {}) {
+  void maxPrevious;
+  return serializeByFile(file, async () => {
+    const stat = await assertPrivateFile(file, { maxBytes: 256 * 1024 });
+    const parsed = JSON.parse(await fsp.readFile(file, "utf8"));
+    if (!plainObject(parsed) || !plainObject(parsed[alias])) throw new Error(`target alias is not in the table: ${alias}`);
+    const entry = parsed[alias];
+    const held = requireUuid(entry.sessionId, "sessionId");
+    const next = requireUuid(nextSessionId, "sessionId");
+    if (sameUuid(held, next)) return { changed: false, sessionId: held, previousSessionId: null };
+    const updated = { ...parsed, [alias]: { ...entry, sessionId: next } };
+    await atomicPrivateWrite(file, `${JSON.stringify(updated, null, 2)}\n`, { mode: stat.mode & 0o777 });
+    return { changed: true, sessionId: next, previousSessionId: held };
+  });
+}
+
+// One writer at a time per file, in this process. Exported because the file beside the table is
+// rewritten the same way and by the same callers, and two queues would not be one queue.
+const fileWriteQueues = new Map();
+export function serializeByFile(file, task) {
+  const queued = (fileWriteQueues.get(file) ?? Promise.resolve()).then(task, task);
+  fileWriteQueues.set(file, queued.then(() => {}, () => {}));
+  return queued;
 }
 
 // One reading of the table, reduced to something two processes can compare. Counting the entries

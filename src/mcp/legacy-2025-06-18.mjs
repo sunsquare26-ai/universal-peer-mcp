@@ -2,6 +2,7 @@ import { SERVER_INFO } from "./modern-2026-07-28.mjs";
 import { publicToolError, publicToolFailure, redactPublic } from "./redact.mjs";
 import { projectSchema, validateSchema } from "./schema-validator.mjs";
 import { publicResultSchema } from "./tools.mjs";
+import { inputDiagnostic } from "./input-diagnostics.mjs";
 
 export const LEGACY_VERSION = "2025-06-18";
 
@@ -16,7 +17,8 @@ export async function handleLegacy(request, { tools, callTool }) {
   if (request.method !== "tools/call") return { jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "method not found" } };
   const name = request.params?.name; const args = request.params?.arguments ?? {};
   const tool = tools.find((candidate) => candidate.name === name);
-  if (!tool || !plain(args) || !validateSchema(tool.inputSchema, args).valid) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "invalid tools/call parameters" } };
+  const diagnostic = inputDiagnostic(tool, args);
+  if (diagnostic) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: `invalid tools/call parameters: ${diagnostic}` } };
   try {
     const value = publicResult(tool, await callTool(name, args));
     return { jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value } };
