@@ -201,7 +201,7 @@ const doorbell = new DoorbellService({ store, root: paths.root, settings, codexP
     // M5: the attempt names the session it is for; an alias that names another one by now is refused
     // before anything is reserved or written.
     if (expectSessionId && !sameUuid(targets[alias]?.sessionId ?? "", expectSessionId)) return Promise.reject(Object.assign(new Error("the alias names another session now"), { code: "WAKE_GENERATION_STALE" }));
-    return core.send({ alias, messageId, threadId, kind: "doorbell", body: line }, milestoneSendOptions({ wireBody: line }));
+    return core.send({ alias, messageId, threadId, kind: "doorbell", body: line }, milestoneSendOptions({ wireBody: line, ...(expectSessionId ? { expectSessionId } : {}) }));
   } });
 // M5 F0: a stuck message is reported to its sender, in the sender's own inbox (src/core/receipts.mjs).
 const receipts = new ReceiptService({ store, spool: inboundSpool });
