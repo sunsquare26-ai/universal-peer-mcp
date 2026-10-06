@@ -197,7 +197,12 @@ const resolveCodex = createCodexResolver();
 // once more; unknown outcomes older than 30 minutes raise one alarm and are never resent.
 const doorbell = new DoorbellService({ store, root: paths.root, settings, codexPeers: () => codexPeers, claudePeers: () => targets, alerts,
   // The Claude half: the same native path peer_send uses, with the fixed line as the whole wire body.
-  sendClaude: ({ alias, messageId, threadId, line }) => core.send({ alias, messageId, threadId, kind: "doorbell", body: line }, milestoneSendOptions({ wireBody: line })) });
+  sendClaude: ({ alias, messageId, threadId, line, expectSessionId = null }) => {
+    // M5: the attempt names the session it is for; an alias that names another one by now is refused
+    // before anything is reserved or written.
+    if (expectSessionId && !sameUuid(targets[alias]?.sessionId ?? "", expectSessionId)) return Promise.reject(Object.assign(new Error("the alias names another session now"), { code: "WAKE_GENERATION_STALE" }));
+    return core.send({ alias, messageId, threadId, kind: "doorbell", body: line }, milestoneSendOptions({ wireBody: line }));
+  } });
 // M5 F0: a stuck message is reported to its sender, in the sender's own inbox (src/core/receipts.mjs).
 const receipts = new ReceiptService({ store, spool: inboundSpool });
 await receipts.enable();

@@ -173,3 +173,15 @@ test("M5: a relinked doorbell is a new attempt — a success recorded for the ol
     expect(starts[1].clientUserMessageId).toBe(relinked);
   } finally { server.close(); }
 });
+
+test("M5: asked again right before the write — relinked or processed during the inspection, nothing is started", async () => {
+  const r = await root(); const server = await appServerTarget(r); const log = []; const id = crypto.randomUUID();
+  try {
+    let asked = 0;
+    const wake = new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.159.0", calls: log }), authorize: async () => (++asked === 1 ? true : "WAKE_GENERATION_STALE") });
+    await expect(wake.wake({ codexAlias: "codex-main", messageId: id })).rejects.toMatchObject({ code: "WAKE_GENERATION_STALE" });
+    expect(asked).toBe(2);
+    expect(log.filter(([m]) => m === "turn/start" || m === "turn/steer")).toHaveLength(0);
+    expect(await fs.readdir(path.join(r, "codex-wake")).catch(() => [])).toEqual([]);   // reservation dropped: a later attempt is not blocked
+  } finally { server.close(); }
+});

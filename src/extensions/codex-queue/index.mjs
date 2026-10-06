@@ -220,8 +220,17 @@ export class CodexWake {
     try { await dir.sync(); } finally { await dir.close(); }
     const bell = doorbell(messageId);
     let attempted = false;
+    // Asked again right before anything is written (M5): the reservation and the inspection await, and
+    // the Owner may have relinked the message (or it was processed) meanwhile. A refusal here is before
+    // any write — the reservation is dropped and the reason kept.
+    const stillAuthorized = async () => {
+      if (!this.authorize) return;
+      const verdict = await this.authorize(codexAlias, messageId, attemptKey);
+      if (verdict !== true) throw Object.assign(fail(typeof verdict === "string" ? verdict : "WAKE_NOT_AUTHORIZED"), { beforeWrite: true });
+    };
     try {
       const result = await this.inspect(codexAlias, async ({ rpc, thread, target, state, serverVersion, activeTurnId }) => {
+        await stillAuthorized();
         if (target.transport === "cli-queue") {
           attempted = true;
           await this.enqueue(target, bell);
@@ -244,6 +253,7 @@ export class CodexWake {
     } catch (error) {
       if (!attempted) await fsp.unlink(file);
       if (!attempted && ["VERSION_MISMATCH", "VERSION_UNKNOWN"].includes(error?.code)) throw fail(error.code);
+      if (!attempted && error?.beforeWrite) throw fail(error.code);
       throw fail(attempted ? "DELIVERY_UNCERTAIN" : "TARGET_UNAVAILABLE");
     }
   }

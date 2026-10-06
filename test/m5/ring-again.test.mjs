@@ -223,3 +223,11 @@ describe("relink generations, review of 5adccbd", () => {
     expect(s.store.events.filter((e) => e.type === "peer_post_relinked")).toHaveLength(1);
   });
 });
+
+test("the Claude sender is told which session the attempt is for", async () => {
+  const s = await stand(); s.back();
+  let seen = null; s.service.sendClaude = async (args) => { seen = args.expectSessionId; return {}; };
+  const p = await s.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "c-1", recipientKind: "claude", recipientSessionId: S1 });
+  await s.service.ring(p.messageId, { first: true });
+  expect(seen).toBe(S1);
+});

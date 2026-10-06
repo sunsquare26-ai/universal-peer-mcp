@@ -181,7 +181,11 @@ export class DoorbellService {
         line = claudeDoorbellVersions(post.messageId).find((candidate) => hashOf(candidate) === prior.requestHash) ?? null;
         if (line === null) return record("unknown", { errorCode: "DOORBELL_ENVELOPE_UNKNOWN" });
       }
-      const result = await this.sendClaude({ alias: post.recipient, messageId: derived, threadId: post.messageId, line });
+      // The attempt's session goes with it: the sender refuses if the alias names another session by
+      // the time it writes (the daemon adapter checks before core.send resolves the target).
+      const verdict = this.authorize(post.recipient, post.messageId, attempt);
+      if (verdict !== true) return record("not_sent", { errorCode: verdict });
+      const result = await this.sendClaude({ alias: post.recipient, messageId: derived, threadId: post.messageId, line, expectSessionId: attempt.binding });
       // A replay sends nothing; it reports what the first attempt reached. Only evidence of a
       // completed write counts as sent — a reservation alone (a crash before the write) does not.
       if (result?.replay && !WRITTEN_STATES.has(result.status)) return record("unknown", { errorCode: "REPLAY_NOT_WRITTEN", replayStatus: typeof result.status === "string" ? result.status : null });
