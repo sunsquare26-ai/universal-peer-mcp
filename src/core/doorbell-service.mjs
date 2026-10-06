@@ -54,7 +54,7 @@ export class DoorbellService {
     this.running = new Map();
     // No shared "current target": every ring passes its own immutable target (review [상]).
     const releases = settings.codexReleasesDir?.value ?? DEFAULT_CODEX_RELEASES;
-    this.wake = wake ?? new CodexWake({ root, authorize: (alias, messageId) => this.authorize(alias, messageId), cliFor: (version) => cliForVersion(version, releases), sockets: () => codexSockets(settings.codexSocketDir?.value ?? DEFAULT_CODEX_SOCKET_DIR) });
+    this.wake = wake ?? new CodexWake({ root, authorize: (alias, messageId, attemptKey) => this.authorize(alias, messageId, attemptKey === undefined ? null : { attemptKey }), cliFor: (version) => cliForVersion(version, releases), sockets: () => codexSockets(settings.codexSocketDir?.value ?? DEFAULT_CODEX_SOCKET_DIR) });
   }
   configured() { return Boolean(this.settings.codexCli?.value && this.settings.codexAppServerSocket?.value); }
   post(messageId) { return this.store.events.find((e) => e.type === "peer_post" && sameUuid(e.messageId, messageId)) ?? null; }
@@ -63,17 +63,22 @@ export class DoorbellService {
   processed(messageId) { return this.store.events.some((e) => e.type === "peer_post_processed" && sameUuid(e.messageId, messageId)); }
 
   // Host settings + the thread of this one post.
-  targetFor(post) {
-    return { transport: "existing-app-server", cliPath: this.settings.codexCli.value, socketPath: this.settings.codexAppServerSocket.value, threadId: this.bindingOf(post), ...(this.settings.codexVersion?.value ? { codexVersion: this.settings.codexVersion.value } : {}) };
+  targetFor(post, attempt = this.attemptOf(post)) {
+    return { transport: "existing-app-server", cliPath: this.settings.codexCli.value, socketPath: this.settings.codexAppServerSocket.value, threadId: attempt.binding, ...(this.settings.codexVersion?.value ? { codexVersion: this.settings.codexVersion.value } : {}) };
   }
 
   // Only a message in the daemon inbox, delivered to this alias and session/thread, not yet
   // processed, and whose alias still names that session/thread.
-  authorize(alias, messageId) {
+  // `attempt` (M5): the generation an attempt started in. An attempt whose message has since been
+  // relinked is stale — it is refused here, so an old attempt never rings the new session or the
+  // old one under the new generation's name.
+  authorize(alias, messageId, attempt = null) {
     const post = this.post(messageId);
     if (!post) return "WAKE_UNKNOWN_MESSAGE";
     const codex = post.recipientKind === "codex";
-    const bound = this.bindingOf(post);
+    if (attempt?.attemptKey && attempt.attemptKey !== this.attemptKeyOf(post)) return "WAKE_GENERATION_STALE";
+    if (attempt?.generation !== undefined && attempt.generation !== this.generationOf(post)) return "WAKE_GENERATION_STALE";
+    const bound = attempt?.binding ?? this.bindingOf(post);
     if (post.recipient !== alias || !["codex", "claude"].includes(post.recipientKind) || typeof bound !== "string") return "WAKE_NOT_RECIPIENT";
     if (this.processed(messageId)) return "WAKE_ALREADY_PROCESSED";
     const current = codex ? this.codexPeers()?.[alias]?.threadId : this.claudePeers()?.[alias]?.sessionId;
@@ -95,6 +100,9 @@ export class DoorbellService {
   // Which relink generation a post is in: 0 as accepted, else the seq of the Owner's latest relink.
   // Each generation is a separate delivery attempt with its own transport ids, so a success at the
   // previous session never stands for the session the message was moved to.
+  // An attempt's identity, fixed when it starts and used for its target, its transport ids and its
+  // outcome row: {generation, binding, attemptKey, claudeId}.
+  attemptOf(post) { return Object.freeze({ generation: this.generationOf(post), binding: this.bindingOf(post), attemptKey: this.attemptKeyOf(post), claudeId: this.claudeTransportIdOf(post) }); }
   generationOf(post) { return this.#relinks().get(String(post.messageId).toLowerCase())?.seq ?? 0; }
   attemptKeyOf(post) { const g = this.generationOf(post); return g ? uuidv5(`doorbell:${post.messageId.toLowerCase()}:relink:${g}`) : post.messageId; }
   claudeTransportIdOf(post) { const g = this.generationOf(post); return g ? uuidv5(`doorbell:${post.messageId.toLowerCase()}:relink:${g}`) : uuidv5(`doorbell:${post.messageId}`); }
@@ -119,9 +127,10 @@ export class DoorbellService {
     await this.ring(row.messageId, { first: true });
   }
 
-  async ring(messageId, { first = false, retry = false } = {}) {
+  async ring(messageId, { first = false, retry = false, generation = null } = {}) {
     const known = this.post(messageId);
-    const runKey = `${messageId}:${known ? this.generationOf(known) : 0}`;
+    const expectedGeneration = generation ?? (known ? this.generationOf(known) : 0);
+    const runKey = `${messageId}:${expectedGeneration}`;
     if (this.running.has(runKey)) return this.running.get(runKey);
     const job = (async () => {
       const post = this.post(messageId);
@@ -131,19 +140,22 @@ export class DoorbellService {
         catch (error) { if (error.code !== "DUP") throw error; return { state: "duplicate_intent" }; }
       }
       if (retry) await this.store.append("doorbell_retry", { messageId: post.messageId });
-      const verdict = this.authorize(post.recipient, post.messageId);
-      if (verdict !== true) return this.#record(post, "not_sent", { errorCode: verdict, ...(verdict === "WAKE_TARGET_MISMATCH" ? { reason: "wake_target_mismatch", boundThreadId: (post.recipientKind === "codex" ? this.codexPeers()?.[post.recipient]?.threadId : this.claudePeers()?.[post.recipient]?.sessionId) ?? null } : {}) });
-      if (post.recipientKind === "claude") return this.#ringClaude(post);
-      if (!this.configured()) return this.#record(post, "not_sent", { errorCode: "DOORBELL_NOT_CONFIGURED" });
+      const attempt = this.attemptOf(post);
+      if (attempt.generation !== expectedGeneration) return { state: "stale_generation" };
+      const record = (state, extra = {}) => this.#record(post, state, extra, attempt);
+      const verdict = this.authorize(post.recipient, post.messageId, attempt);
+      if (verdict !== true) return record("not_sent", { errorCode: verdict, ...(verdict === "WAKE_TARGET_MISMATCH" ? { reason: "wake_target_mismatch", boundThreadId: (post.recipientKind === "codex" ? this.codexPeers()?.[post.recipient]?.threadId : this.claudePeers()?.[post.recipient]?.sessionId) ?? null } : {}) });
+      if (post.recipientKind === "claude") return this.#ringClaude(post, attempt);
+      if (!this.configured()) return record("not_sent", { errorCode: "DOORBELL_NOT_CONFIGURED" });
       try {
-        const result = await this.wake.wake({ codexAlias: post.recipient, messageId: post.messageId, target: this.targetFor(post), attemptKey: this.attemptKeyOf(post) });
+        const result = await this.wake.wake({ codexAlias: post.recipient, messageId: post.messageId, target: this.targetFor(post, attempt), attemptKey: attempt.attemptKey });
         const state = result.mode === "held_behind_running_turn" ? "held" : "sent";
-        return this.#record(post, state, { mode: result.mode, ...(result.turnId ? { turnId: result.turnId } : {}), ...(result.replay ? { replay: true } : {}) });
+        return record(state, { mode: result.mode, ...(result.turnId ? { turnId: result.turnId } : {}), ...(result.replay ? { replay: true } : {}) });
       } catch (error) {
         const c = code(error);
-        if (c === "DELIVERY_UNCERTAIN") return this.#record(post, "unknown", { errorCode: c });
-        if (c === "TARGET_UNAVAILABLE") return this.#queueFallback(post);
-        return this.#record(post, "not_sent", { errorCode: c });
+        if (c === "DELIVERY_UNCERTAIN") return record("unknown", { errorCode: c });
+        if (c === "TARGET_UNAVAILABLE") return this.#queueFallback(post, attempt);
+        return record("not_sent", { errorCode: c });
       }
     })();
     this.running.set(runKey, job);
@@ -153,47 +165,54 @@ export class DoorbellService {
   // Claude: one fixed line through the native session socket (the path peer_send uses), under an id
   // derived from the post id so a retry after a restart is a replay, never a second write. The
   // socket write is `sent`; that the session read it is proven only by its own inbox-ack.
-  async #ringClaude(post) {
-    if (typeof this.sendClaude !== "function") return this.#record(post, "not_sent", { errorCode: "DOORBELL_NOT_CONFIGURED" });
+  async #ringClaude(post, attempt) {
+    const record = (state, extra = {}) => this.#record(post, state, extra, attempt);
+    if (typeof this.sendClaude !== "function") return record("not_sent", { errorCode: "DOORBELL_NOT_CONFIGURED" });
     try {
       // A doorbell already reserved under this derived id (by this build or an earlier one, before a
       // restart) is replayed byte for byte: the wording whose request hash the reservation holds is
       // looked up among every wording ever sent. A reservation matching none is not re-sent with
       // something else — it is recorded unknown for a hand.
-      const derived = this.claudeTransportIdOf(post);
+      const derived = attempt.claudeId;
       let prior = null; try { prior = typeof this.store.request === "function" ? this.store.request(derived) : null; } catch {}
       let line = claudeDoorbell(post.messageId);
       if (prior) {
         const hashOf = (body) => sha256(canonicalSend({ alias: post.recipient, messageId: derived, threadId: post.messageId, kind: "doorbell", body }));
         line = claudeDoorbellVersions(post.messageId).find((candidate) => hashOf(candidate) === prior.requestHash) ?? null;
-        if (line === null) return this.#record(post, "unknown", { errorCode: "DOORBELL_ENVELOPE_UNKNOWN" });
+        if (line === null) return record("unknown", { errorCode: "DOORBELL_ENVELOPE_UNKNOWN" });
       }
       const result = await this.sendClaude({ alias: post.recipient, messageId: derived, threadId: post.messageId, line });
       // A replay sends nothing; it reports what the first attempt reached. Only evidence of a
       // completed write counts as sent — a reservation alone (a crash before the write) does not.
-      if (result?.replay && !WRITTEN_STATES.has(result.status)) return this.#record(post, "unknown", { errorCode: "REPLAY_NOT_WRITTEN", replayStatus: typeof result.status === "string" ? result.status : null });
-      return this.#record(post, "sent", { mode: "session_socket", ...(result?.replay ? { replay: true } : {}) });
+      if (result?.replay && !WRITTEN_STATES.has(result.status)) return record("unknown", { errorCode: "REPLAY_NOT_WRITTEN", replayStatus: typeof result.status === "string" ? result.status : null });
+      return record("sent", { mode: "session_socket", ...(result?.replay ? { replay: true } : {}) });
     } catch (error) {
       const c = code(error);
-      return this.#record(post, c === "DELIVERY_UNCERTAIN" || c === "MESSAGE_ID_CONFLICT" ? "unknown" : "not_sent", { errorCode: c });
+      return record(c === "DELIVERY_UNCERTAIN" || c === "MESSAGE_ID_CONFLICT" ? "unknown" : "not_sent", { errorCode: c });
     }
   }
 
   // The app-server could not say whether the thread is idle or running: the doorbell goes into the
   // CLI queue, which delivers when any running turn ends — so it is recorded as held, never as sent.
   // The release check still applies: without a server to ask, the CLI must match the pinned release.
-  async #queueFallback(post) {
+  async #queueFallback(post, attempt) {
+    const record = (state, extra = {}) => this.#record(post, state, extra, attempt);
     const pin = this.settings.codexVersion?.value;
-    if (!pin) return this.#record(post, "not_sent", { errorCode: "VERSION_UNKNOWN", via: "queue" });
+    if (!pin) return record("not_sent", { errorCode: "VERSION_UNKNOWN", via: "queue" });
     let version = null; try { version = await this.cliVersion(this.settings.codexCli.value); } catch {}
-    if (version !== pin) return this.#record(post, "not_sent", { errorCode: "VERSION_MISMATCH", via: "queue" });
-    try { await this.enqueue({ cliPath: this.settings.codexCli.value, threadId: this.bindingOf(post), cwd: "/" }, doorbell(post.messageId)); }
-    catch (error) { return this.#record(post, code(error) === "INVALID_QUEUE_CALL" ? "not_sent" : "unknown", { errorCode: code(error), via: "queue" }); }
-    return this.#record(post, "held", { mode: "held_behind_running_turn", via: "queue" });
+    if (version !== pin) return record("not_sent", { errorCode: "VERSION_MISMATCH", via: "queue" });
+    // The queue is still this attempt's: refused if the message was relinked meanwhile.
+    const verdict = this.authorize(post.recipient, post.messageId, attempt);
+    if (verdict !== true) return record("not_sent", { errorCode: verdict, via: "queue" });
+    try { await this.enqueue({ cliPath: this.settings.codexCli.value, threadId: attempt.binding, cwd: "/" }, doorbell(post.messageId)); }
+    catch (error) { return record(code(error) === "INVALID_QUEUE_CALL" ? "not_sent" : "unknown", { errorCode: code(error), via: "queue" }); }
+    return record("held", { mode: "held_behind_running_turn", via: "queue" });
   }
 
-  async #record(post, state, extra = {}) {
-    const row = await this.store.append("doorbell_outcome", { messageId: post.messageId, recipient: post.recipient, recipientKind: post.recipientKind, threadId: this.bindingOf(post), state, ...extra });
+  // The outcome names the attempt it belongs to: its binding, and its relink generation when not 0
+  // (generation-0 rows keep their old shape). Readers judge the current generation by these rows.
+  async #record(post, state, extra = {}, attempt = this.attemptOf(post)) {
+    const row = await this.store.append("doorbell_outcome", { messageId: post.messageId, recipient: post.recipient, recipientKind: post.recipientKind, threadId: attempt.binding, state, ...(attempt.generation ? { relinkSeq: attempt.generation } : {}), ...extra });
     return { state, seq: row.seq, ...extra };
   }
 
@@ -249,6 +268,7 @@ export class DoorbellService {
   // this one function, so what status promises is what a return will do.
   eligibleAgain(post, index = this.againIndex()) {
     const id = post.messageId.toLowerCase();
+    if (this.generationOf(post) !== 0) return false;   // a relinked message is rung by ringRelinked
     const outcomes = index.outcomes.get(id) ?? [];
     if (!outcomes.length || outcomes.some((e) => e.state !== "not_sent") || DoorbellService.QUIET.has(outcomes[0].errorCode) || index.closed.has(id) || [...this.running.keys()].some((k) => k.startsWith(`${post.messageId}:`))) return false;
     const current = post.recipientKind === "codex" ? this.codexPeers()?.[post.recipient]?.threadId : post.recipientKind === "claude" ? this.claudePeers()?.[post.recipient]?.sessionId : null;
@@ -290,7 +310,7 @@ export class DoorbellService {
     const generation = this.generationOf(post); if (!generation) return null;
     try { await this.store.appendChecked("doorbell_relink_ring", { messageId: post.messageId, recipient: post.recipient, threadId: this.bindingOf(post), relinkSeq: generation }, (events) => (events.some((e) => (e.type === "peer_post_processed" && sameUuid(e.messageId, messageId)) || (e.type === "doorbell_relink_ring" && sameUuid(e.messageId, messageId) && e.relinkSeq === generation)) ? Object.assign(new Error("claimed"), { code: "DUP" }) : null)); }
     catch (error) { if (error.code === "DUP") return null; throw error; }
-    return this.ring(post.messageId, {});
+    return this.ring(post.messageId, { generation });
   }
   resumeOpenIntents() { return this.sweep(); }
   sweepUnknown() { return this.sweep().then((r) => r.alerted); }

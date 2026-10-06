@@ -16,21 +16,25 @@
 //   held         messages waiting for a previous session of this alias (only the Owner moves them).
 // Aliases no longer registered that still have unprocessed messages are listed under `unregistered`.
 export function overview({ events, peers, held = new Map(), heldIds = new Map(), presence = new Map(), eligible = () => false, now = Date.now(), daemon = null }) {
-  const processed = new Set(); const lastOutcome = new Map(); const lastSeen = new Map();
+  const processed = new Set(); const lastOutcome = new Map(); const lastSeen = new Map(); const generation = new Map();
   const seen = (alias, at) => { if (typeof alias === "string" && (!lastSeen.has(alias) || lastSeen.get(alias) < at)) lastSeen.set(alias, at); };
   for (const e of events) {
     const id = typeof e.messageId === "string" ? e.messageId.toLowerCase() : null;
     if (e.type === "peer_post_processed") { if (id) processed.add(id); seen(e.readerAlias, e.at); }
     else if (e.type === "peer_post") { if (e.source !== "receipt") seen(e.senderAlias, e.at); }
-    else if (e.type === "doorbell_outcome" && id) lastOutcome.set(id, e);
+    else if (e.type === "peer_post_relinked" && id) generation.set(id, e.seq);
+    else if (e.type === "doorbell_outcome" && id) lastOutcome.set(`${id}:${e.relinkSeq ?? 0}`, e);
   }
   const waiting = new Map();
   for (const e of events) {
     if (e.type !== "peer_post" || typeof e.recipient !== "string" || e.recipient === "*" || processed.has(e.messageId.toLowerCase())) continue;
     const w = waiting.get(e.recipient) ?? { unprocessed: 0, oldestAt: null, undelivered: 0, uncertain: 0, autoRetry: 0 };
     w.unprocessed += 1; if (!w.oldestAt || e.at < w.oldestAt) w.oldestAt = e.at;
-    const last = lastOutcome.get(e.messageId.toLowerCase());
-    if (last?.state === "not_sent") { w.undelivered += 1; if (eligible(e)) w.autoRetry += 1; }
+    // Judged by the current relink generation only: a past session's outcome never stands for the
+    // session the message was moved to, and a moved message with no outcome yet was not rung.
+    const gen = generation.get(e.messageId.toLowerCase()) ?? 0;
+    const last = lastOutcome.get(`${e.messageId.toLowerCase()}:${gen}`);
+    if (last?.state === "not_sent" || (gen !== 0 && !last)) { w.undelivered += 1; if (eligible(e)) w.autoRetry += 1; }
     else if (last?.state === "unknown") w.uncertain += 1;
     waiting.set(e.recipient, w);
   }

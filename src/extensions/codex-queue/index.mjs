@@ -200,7 +200,7 @@ export class CodexWake {
   async wake({ codexAlias, messageId, target: given = null, attemptKey = messageId }) {
     if (given !== null) given = Object.freeze({ ...given });
     if (!UUID_LOWER.test(messageId ?? "") || !UUID_LOWER.test(attemptKey ?? "")) throw fail("TARGET_UNAVAILABLE");
-    if (this.authorize) { const verdict = await this.authorize(codexAlias, messageId); if (verdict !== true) throw fail(typeof verdict === "string" ? verdict : "WAKE_NOT_AUTHORIZED"); }
+    if (this.authorize) { const verdict = await this.authorize(codexAlias, messageId, attemptKey); if (verdict !== true) throw fail(typeof verdict === "string" ? verdict : "WAKE_NOT_AUTHORIZED"); }
     const directory = path.join(this.root, "codex-wake"); await ensurePrivateDirectory(directory);
     const file = path.join(directory, attemptKey + ".json");
     const hash = crypto.createHash("sha256").update(JSON.stringify([codexAlias, attemptKey])).digest("hex");
