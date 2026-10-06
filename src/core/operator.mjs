@@ -25,11 +25,21 @@ export function controllingTty(pid) {
 // terminal (the daemon then refuses and records the attempt).
 export async function askOperator(target, { input = process.stdin, output = process.stderr } = {}) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) return null;
-  output.write(`${OPERATOR_LABEL}: type ${operatorPhrase(target)} to continue: `);
+  // M5: the phrase on a line of its own, in the Owner's language, so it can be copied whole. A
+  // command pasted together with the next one used to answer this prompt with that next command.
+  output.write(`${OPERATOR_LABEL}: 이 작업은 터미널에서 직접 확인해야 합니다. 아래 한 줄을 그대로 입력하고 Enter 를 누르세요.\n  ${operatorPhrase(target)}\n> `);
   return await new Promise((resolve) => {
     let buffer = "";
-    const done = (value) => { input.off("data", onData); input.pause(); resolve(value); };
+    // The one line is all this reads: the terminal is let go of at once, so a refusal ends the
+    // process now rather than when the terminal next closes.
+    const done = (value) => { input.off("data", onData); input.pause(); if (input === process.stdin) { try { input.destroy(); } catch {} } resolve(value); };
     const onData = (chunk) => { buffer += chunk.toString("utf8"); const at = buffer.indexOf("\n"); if (at >= 0) done(buffer.slice(0, at).replace(/\r$/, "")); if (buffer.length > 256) done(null); };
     input.on("data", onData); input.resume();
   });
+}
+
+// M5: what to tell the Owner when the typed line is not the phrase — before anything is sent.
+export function confirmMismatch(target, typed) {
+  const pasted = typeof typed === "string" && /universal-peer-mcp\s/.test(typed);
+  return Object.assign(new Error(`확인 문구가 달라 아무것도 바꾸지 않았습니다. 입력해야 할 문구: ${operatorPhrase(target)}${pasted ? " — 다음 명령이 답으로 들어간 것 같습니다. 명령은 한 줄씩 실행하세요." : ""}`), { code: "OPERATOR_CONFIRM_MISMATCH" });
 }

@@ -18,9 +18,12 @@ import { sendDoorbell } from "./core/doorbell.mjs";
 // operator(interactive-tty): the phrase is asked only at an interactive terminal; anywhere else the
 // command is sent without it and the daemon decides (own items pass, others are refused).
 async function operatorArgs(target) {
-  const { askOperator } = await import("./core/operator.mjs");
+  const { askOperator, confirmMismatch, operatorPhrase } = await import("./core/operator.mjs");
   const confirm = await askOperator(target);
-  return confirm === null ? {} : { operator: { confirm } };
+  // A wrong phrase is answered here, in plain words, before anything is sent (the daemon still
+  // enforces it for any caller that skips this).
+  if (confirm !== null && confirm.trim() !== operatorPhrase(target)) throw confirmMismatch(target, confirm);
+  return confirm === null ? {} : { operator: { confirm: confirm.trim() } };
 }
 function option(args, name) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; }
 
@@ -85,6 +88,9 @@ export async function observeCommand(command, args) {
     const alias = option(args, "--alias");
     if (!alias) throw new Error("usage: unregister --alias <name>");
     const { controlCall } = await import("./core/control.mjs");
+    // M5: an alias that is not registered is said at once, not after asking for a confirmation.
+    const { peers } = await controlCall("peer_directory", {});
+    if (!peers.some((p) => p.alias === alias)) throw Object.assign(new Error(`등록된 별칭이 아닙니다: ${alias} (목록: universal-peer-mcp peers)`), { code: "UNKNOWN_ALIAS" });
     return controlCall("peer_unregister", { alias, ...(await operatorArgs(alias)) });
   }
   if (command === "peers") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_directory", {}); }

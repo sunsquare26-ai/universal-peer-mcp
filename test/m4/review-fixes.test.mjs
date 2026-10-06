@@ -223,7 +223,10 @@ test("cross-session mutations are refused: dispose, link, relink, unregister of 
 test("operator(interactive-tty): the phrase typed at a terminal outside any session passes and is recorded; a wrong phrase does not", async () => {
   const { L, c1, x1 } = await setup();
   const wrong = await L.detached(["unregister", "--alias", "test-claude-1"], "CONFIRM test-codex-1");
-  expect(wrong.prompted).toBe(true); expect(wrong.error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "confirm_mismatch" });
+  // M5: a wrong phrase is answered at the terminal, in plain words naming the right one, and nothing is sent.
+  expect(wrong.prompted).toBe(true); expect(wrong.error).toMatchObject({ code: "OPERATOR_CONFIRM_MISMATCH" }); expect(wrong.error.message).toContain("CONFIRM test-claude-1");
+  const pasted = await L.detached(["unregister", "--alias", "test-claude-1"], "universal-peer-mcp unregister --alias test-codex-1");
+  expect(pasted.error.message).toContain("한 줄씩");
   expect((await L.detached(["unregister", "--alias", "test-claude-1"], "CONFIRM test-claude-1")).json).toEqual({ removed: true, alias: "test-claude-1", kind: "claude" });
   const m = await post(L, x1, "test-codex-1", "to self");
   const seq = (await x1.run(["inbox"])).json.events[0].seq;

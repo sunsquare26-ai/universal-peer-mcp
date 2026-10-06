@@ -32,7 +32,8 @@ test("a Claude double and a Codex double register themselves; peers lists them; 
   expect((await a.run(["unregister", "--alias", "test-codex-1"])).error).toMatchObject({ code: "OPERATOR_REQUIRED", reason: "inside_session" });
   expect((await x.run(["unregister", "--alias", "test-codex-1"])).json).toEqual({ removed: true, alias: "test-codex-1", kind: "codex" });
   expect((await x.run(["whoami"])).json).toMatchObject({ authenticated: false, kind: "codex", reason: "session_not_allowlisted" });
-  expect((await x.run(["unregister", "--alias", "test-codex-1"])).error).toMatchObject({ code: "OPERATOR_REQUIRED" });
+  // M5: an alias that is gone is said at once.
+  expect((await x.run(["unregister", "--alias", "test-codex-1"])).error).toMatchObject({ code: "UNKNOWN_ALIAS" });
   const types = (await L.events()).map((e) => e.type);
   expect(types.filter((t) => t === "peer_registered")).toHaveLength(2);
   expect(types).toContain("peer_unregistered"); expect(types).toContain("peer_register_refused");

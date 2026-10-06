@@ -1,5 +1,7 @@
 // M4 test lane: a daemon from this tree on a private state dir, a private Claude sessions dir and a
 // private CODEX_HOME, and session doubles (fake-session.mjs). Never the live daemon or live sessions.
+// The operator prompt ends with the phrase on its own line and this marker (src/core/operator.mjs).
+const OPERATOR_PROMPT = "\n> ";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -114,13 +116,13 @@ async function runOperator(argv, env, phrase) {
   const quoted = [process.execPath, cli, ...argv].map((a) => `'${String(a).replace(/'/g, "'\\''")}'`).join(" ");
   const child = spawn("/bin/sh", ["-c", `/bin/cat | /usr/bin/script -q /dev/null ${quoted} | /bin/cat`], { env: clean, stdio: ["pipe", "pipe", "pipe"] });
   let out = ""; let typed = false;
-  child.stdout.on("data", (d) => { out += d; if (!typed && out.includes("to continue:")) { typed = true; setTimeout(() => child.stdin.write(`${phrase}\n`), 50); } });
+  child.stdout.on("data", (d) => { out += d; if (!typed && out.includes(OPERATOR_PROMPT)) { typed = true; setTimeout(() => child.stdin.write(`${phrase}\n`), 50); } });
   const exited = new Promise((r) => child.on("close", r));
   // script ends when the command does; cat in front ends when its input closes.
   const watcher = setInterval(() => { if (/\}\s*$/.test(out.replace(/\r/g, ""))) child.stdin.end(); }, 50);
   const code = await exited; clearInterval(watcher);
   const text = out.replace(/\r/g, "");
-  const after = typed ? text.slice(text.indexOf("to continue:") + 12) : text;
+  const after = typed ? text.slice(text.indexOf(OPERATOR_PROMPT) + OPERATOR_PROMPT.length) : text;
   const start = after.indexOf("{");
   let json = null; let error = null;
   try { const parsed = JSON.parse(after.slice(start)); if (parsed && parsed.ok === false) error = parsed; else json = parsed; } catch { error = { raw: text.slice(-400) }; }
@@ -143,7 +145,7 @@ async function runDetached(argv, env, phrase) {
   let writer = null; let typed = false;
   if (phrase !== null) writer = await fsp.open(fifo, "w");
   for (let i = 0; i < 600; i += 1) {
-    if (writer && !typed && ((await read(out)) ?? "").includes("to continue:")) { typed = true; await writer.write(`${phrase}\n`); }
+    if (writer && !typed && ((await read(out)) ?? "").includes(OPERATOR_PROMPT)) { typed = true; await writer.write(`${phrase}\n`); await writer.close().catch(() => {}); writer = null; }
     if ((await read(rc)) !== null) break;
     await Bun.sleep(25);
   }
@@ -151,7 +153,7 @@ async function runDetached(argv, env, phrase) {
   const text = ((await read(out)) ?? "").replace(/\r/g, "");
   const code = Number(((await read(rc)) ?? "").trim());
   await fsp.rm(dir, { recursive: true, force: true });
-  const after = typed ? text.slice(text.indexOf("to continue:") + 12) : text;
+  const after = typed ? text.slice(text.indexOf(OPERATOR_PROMPT) + OPERATOR_PROMPT.length) : text;
   let json = null; let error = null;
   try { const parsed = JSON.parse(after.slice(after.indexOf("{"))); if (parsed && parsed.ok === false) error = parsed; else json = parsed; } catch { error = { raw: text.slice(-400) }; }
   return { code, json, error, prompted: typed };
