@@ -1,5 +1,7 @@
 // M4 test lane: a daemon from this tree on a private state dir, a private Claude sessions dir and a
 // private CODEX_HOME, and session doubles (fake-session.mjs). Never the live daemon or live sessions.
+// The operator prompt ends with the phrase on its own line and this marker (src/core/operator.mjs).
+const OPERATOR_PROMPT = "\n> ";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -42,6 +44,8 @@ export async function lane() {
     // CODEX_THREAD_ID is removed from its environment. With a phrase it runs under script(1) (a pty and
     // a controlling terminal) and the phrase is typed; without one it has no terminal at all.
     async detached(argv, phrase = null) { return runDetached(argv, env, phrase); },
+    // A script run the same way (own terminal, outside any session) — a caller that skips the CLI.
+    async detachedEval(code) { return runDetached([], env, null, [process.execPath, "-e", code]); },
     async stop() {
       for (const s of sessionsList.splice(0)) await s.close();
       await stopDaemon(root);
@@ -114,28 +118,29 @@ async function runOperator(argv, env, phrase) {
   const quoted = [process.execPath, cli, ...argv].map((a) => `'${String(a).replace(/'/g, "'\\''")}'`).join(" ");
   const child = spawn("/bin/sh", ["-c", `/bin/cat | /usr/bin/script -q /dev/null ${quoted} | /bin/cat`], { env: clean, stdio: ["pipe", "pipe", "pipe"] });
   let out = ""; let typed = false;
-  child.stdout.on("data", (d) => { out += d; if (!typed && out.includes("to continue:")) { typed = true; setTimeout(() => child.stdin.write(`${phrase}\n`), 50); } });
+  child.stdout.on("data", (d) => { out += d; if (!typed && out.includes(OPERATOR_PROMPT)) { typed = true; setTimeout(() => child.stdin.write(`${phrase}\n`), 50); } });
   const exited = new Promise((r) => child.on("close", r));
   // script ends when the command does; cat in front ends when its input closes.
   const watcher = setInterval(() => { if (/\}\s*$/.test(out.replace(/\r/g, ""))) child.stdin.end(); }, 50);
   const code = await exited; clearInterval(watcher);
   const text = out.replace(/\r/g, "");
-  const after = typed ? text.slice(text.indexOf("to continue:") + 12) : text;
+  const after = typed ? text.slice(text.indexOf(OPERATOR_PROMPT) + OPERATOR_PROMPT.length) : text;
   const start = after.indexOf("{");
   let json = null; let error = null;
   try { const parsed = JSON.parse(after.slice(start)); if (parsed && parsed.ok === false) error = parsed; else json = parsed; } catch { error = { raw: text.slice(-400) }; }
   return { code, json, error, prompted: typed };
 }
 
-async function runDetached(argv, env, phrase) {
+async function runDetached(argv, env, phrase, program = null) {
   const cli = path.resolve(here, "../../src/cli.mjs");
   const clean = { ...env }; delete clean.CODEX_THREAD_ID;
   const dir = await fsp.realpath(await fsp.mkdtemp("/private/tmp/upm4d-"));
   const fifo = path.join(dir, "in"); const out = path.join(dir, "out"); const rc = path.join(dir, "rc");
   const q = (a) => `'${String(a).replace(/'/g, "'\\''")}'`;
-  const command = [process.execPath, cli, ...argv].map(q).join(" ");
+  const command = [...(program ?? [process.execPath, cli]), ...argv].map(q).join(" ");
   let body;
-  if (phrase === null) body = `${command} < /dev/null > ${q(out)} 2>&1`;
+  if (phrase === null && program) body = `/usr/bin/script -q /dev/null ${command} < /dev/null > ${q(out)} 2>&1`;
+  else if (phrase === null) body = `${command} < /dev/null > ${q(out)} 2>&1`;
   else { execFileSync("/usr/bin/mkfifo", ["-m", "600", fifo]); body = `/bin/cat ${q(fifo)} | /usr/bin/script -q /dev/null ${command} > ${q(out)} 2>&1`; }
   const launcher = spawn("/bin/sh", ["-c", `( ${body}; echo $? > ${q(rc)} ) < /dev/null > /dev/null 2>&1 & exit 0`], { env: clean, stdio: "ignore" });
   await new Promise((r) => launcher.on("close", r));
@@ -143,7 +148,7 @@ async function runDetached(argv, env, phrase) {
   let writer = null; let typed = false;
   if (phrase !== null) writer = await fsp.open(fifo, "w");
   for (let i = 0; i < 600; i += 1) {
-    if (writer && !typed && ((await read(out)) ?? "").includes("to continue:")) { typed = true; await writer.write(`${phrase}\n`); }
+    if (writer && !typed && ((await read(out)) ?? "").includes(OPERATOR_PROMPT)) { typed = true; await writer.write(`${phrase}\n`); await writer.close().catch(() => {}); writer = null; }
     if ((await read(rc)) !== null) break;
     await Bun.sleep(25);
   }
@@ -151,7 +156,7 @@ async function runDetached(argv, env, phrase) {
   const text = ((await read(out)) ?? "").replace(/\r/g, "");
   const code = Number(((await read(rc)) ?? "").trim());
   await fsp.rm(dir, { recursive: true, force: true });
-  const after = typed ? text.slice(text.indexOf("to continue:") + 12) : text;
+  const after = typed ? text.slice(text.indexOf(OPERATOR_PROMPT) + OPERATOR_PROMPT.length) : text;
   let json = null; let error = null;
   try { const parsed = JSON.parse(after.slice(after.indexOf("{"))); if (parsed && parsed.ok === false) error = parsed; else json = parsed; } catch { error = { raw: text.slice(-400) }; }
   return { code, json, error, prompted: typed };
