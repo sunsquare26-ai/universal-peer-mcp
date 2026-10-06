@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { requireUuid } from "../../core/limits.mjs";
+import { referenceHex, requireUuid } from "../../core/limits.mjs";
 
 // The envelope names the writer — our own daemon socket — and says nothing about what that
 // writer is allowed to do. It used to carry `from-mode` and `from-mode-verified-by`, and both
@@ -45,25 +45,26 @@ export function senderEnvelope({ from, body }) {
 // core never found a marker inside one — and a rule that is spelled out in more than one place is
 // a rule that will disagree with itself.
 //
-// What it accepts is exactly what this package writes: the writer's address, and optionally the
-// name of the program that wrote it. The match is deliberately not tolerant. An envelope carrying
-// anything further — a permission mode, a session, a hop chain — is one we cannot check, and
-// taking the body out of it anyway would be reading a message whose header we decided to ignore;
-// it returns null instead, and the frame ends as uncorrelated rather than as a parsed one. The
-// name is not compared against anything: it is a label the writer chose, and nothing here decides
-// on it. The address is, against the `from` the frame itself carries, so an envelope and the
-// frame around it cannot name two different writers. Neither is authentication — that is the
-// kernel's answer about the process that wrote the bytes (receiver.mjs), checked separately.
+// Accept the native builder's fixed order: writer address, optional session (1..80), hop chain
+// (1..32 lowercase 24-hex references), display name, then mode (bypass|prompting). Bounds and
+// order were checked in Claude Code 2.1.260 and pinned in test/sender-identity.test.mjs. All
+// optional attributes are inert metadata, never permission proof; only the body is returned.
+// No unknown attributes, duplicates, alternate ordering or control characters are accepted.
+// The address must exactly equal the frame's from;
+// authentication remains the kernel writer identity (receiver.mjs) and core's request snapshot.
 //
 // Content that is not wrapped at all is returned as it came, because a message written by hand
 // into a session is not wrapped and is still a message (docs/demo-ack.md).
-const INBOUND_ENVELOPE = /^<cross-session-message from="([^"]+)"(?: from-name="[^"]+")?>\n([\s\S]+)\n<\/cross-session-message>$/;
+const INBOUND_ENVELOPE = /^<cross-session-message from="([^"<>\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]+)"(?: from-session="[A-Za-z0-9_-]{1,80}")?(?: hop-chain="[0-9a-f]{24}(?:,[0-9a-f]{24}){0,31}")?(?: from-name="[^"<>\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]+")?(?: from-mode="(?:bypass|prompting)")?>\n([\s\S]+)\n<\/cross-session-message>$/u;
 
 export function unwrapEnvelope(content, from) {
   if (typeof content !== "string") return null;
   if (!content.startsWith("<cross-session-message ")) return content;
   const match = INBOUND_ENVELOPE.exec(content);
-  return match && match[1] === from ? match[2] : null;
+  if (!match || match[1] !== from) return null;
+  // A second envelope must not hide behind a valid first marker in a greedy body match.
+  if (/<\/cross-session-message\b/i.test(match[2])) return null;
+  return match[2];
 }
 
 // Until this line the body went into the tag exactly as it arrived, and the only guard in front
@@ -190,6 +191,72 @@ export function parseMarker(content) {
     if (result.type === "reply" && !["pass", "fail"].includes(result.verdict)) return null;
     return result;
   } catch { return null; }
+}
+
+// The marker above is a machine contract: it states its own version, three full uuids and a
+// verdict from a closed list. A sender that can state all of them is one driving this package from
+// the inside. The other sender cannot, and that is measured rather than assumed — in one Claude
+// Code session on 2026-09-11 every one of 508 reply tool calls carried the same input key set,
+// ["content","message","recipient","summary","to","type"]. There is no parameter in it to put a
+// correlation id in, and no id of its own to state either: the transport mints the message id
+// after the body is written, so the sender cannot know it at the time it writes the line. Its only
+// channel is the text, which is why this convention is in the text.
+//
+// What it accepts is one line of `key=value` tokens after PEER_ACK or PEER_REPLY, in any order,
+// and it requires exactly one of them: a reference to the message being answered, under `re`,
+// `replyTo` or `reply_to`. A thread may be named and is then checked, because a sender that names
+// one must not be able to name the wrong one; it may also be left out, because the request this
+// binds to already carries the thread, and demanding that the sender restate a fact this side
+// holds is what made the strict marker unwritable by hand.
+//
+// Tokens this does not recognise are ignored rather than refused. The line is written by a person
+// or by a model, and `kind=diagnosis` beside `re=<id>` is a label, not a protocol error; refusing
+// the line over it is how every real reply on 2026-09-11 was discarded. The tolerance is bounded
+// on every side — the line, the token count and each value have a limit, an unknown token
+// contributes nothing to the result, a duplicate of a recognised token refuses the line, and the
+// verdict, when present, must be from the same closed list. Invalid/duplicate verdicts
+// refuse correlation; the inbound spool still preserves the original body.
+//
+// It is a second reader and not a loosening of the first. `parseMarker` is untouched and is tried
+// first, so nothing that parses today parses differently; and a frame correlated through this path
+// is recorded under its own evidence, so the ledger never claims the stricter proof for the weaker
+// line.
+const HEADER_LINE = /^PEER_(ACK|REPLY)((?:[ \t]+[A-Za-z_][A-Za-z0-9_-]{0,31}=[^\s]{1,128}){1,12})[ \t]*$/;
+const REPLY_TO_KEYS = new Set(["re", "replyto", "reply_to"]);
+const THREAD_KEYS = new Set(["thread", "threadid", "thread_id"]);
+const RESPONSE_KEYS = new Set(["mid", "messageid", "message_id"]);
+
+export function parseReplyHeader(content) {
+  if (typeof content !== "string" || Buffer.byteLength(content) > 1024 * 1024) return null;
+  // A literal pipe separates a first-line header from its body. Only the header is
+  // tokenized; body text (including marker-looking text) never contributes metadata.
+  const line = content.split(/\r?\n/, 1)[0];
+  const pipe = line.indexOf("|");
+  const first = (pipe < 0 ? line : line.slice(0, pipe)).trim();
+  if (first.length > 1024) return null;
+  const match = HEADER_LINE.exec(first);
+  if (!match) return null;
+  let replyTo = null; let threadId = null; let messageId = null; let verdict = null;
+  let versionSeen = false; let verdictSeen = false;
+  for (const token of match[2].trim().split(/[ \t]+/)) {
+    const split = token.indexOf("=");
+    const key = token.slice(0, split).toLowerCase().replaceAll("-", "_");
+    const value = token.slice(split + 1);
+    if (REPLY_TO_KEYS.has(key)) { if (replyTo !== null) return null; replyTo = referenceHex(value); if (replyTo === null) return null; }
+    else if (THREAD_KEYS.has(key)) { if (threadId !== null) return null; threadId = referenceHex(value); if (threadId === null) return null; }
+    else if (RESPONSE_KEYS.has(key)) { if (messageId !== null) return null; try { messageId = requireUuid(value, "messageId"); } catch { return null; } }
+    else if (key === "v") { if (versionSeen || value !== "1") return null; versionSeen = true; }
+    else if (key === "verdict") {
+      const lowered = value.toLowerCase();
+      if (verdictSeen || (lowered !== "pass" && lowered !== "fail")) return null;
+      verdictSeen = true; verdict = lowered;
+    }
+  }
+  // Nothing to correlate to is not a correlation. A line naming only a thread is left
+  // uncorrelated on purpose: a thread holds many messages and picking one of them would bind an
+  // answer to a message nobody chose.
+  if (replyTo === null) return null;
+  return { style: "inband_header", type: match[1].toLowerCase(), replyTo, threadId, messageId, verdict };
 }
 
 function escapeXml(value) { return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"); }

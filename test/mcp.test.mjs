@@ -18,7 +18,7 @@ const options = { tools, callTool: async () => daemonStatus };
 describe("modern 2026-07-28", () => {
   test("advertises and projects milestone tools only when the daemon enables them", async () => {
     const enabled = toolDefinitions([], { extensions: ["milestone"], requestedExtensions: ["milestone"] });
-    expect(enabled.map((tool) => tool.name)).toEqual(["peer_targets", "peer_status", "peer_send", "peer_wait", "peer_list_events", "daemon_status", "milestone_status", "milestone_list", "milestone_wait", "milestone_recover_ack"]);
+    expect(enabled.map((tool) => tool.name)).toEqual(["peer_targets", "peer_status", "peer_send", "peer_wait", "peer_list_events", "daemon_status", "milestone_status", "milestone_list", "milestone_wait", "milestone_recover_ack", "peer_inbox", "peer_inbox_ack"]);
     const completionMessageId = crypto.randomUUID(); const attemptId = crypto.randomUUID(); const instructionId = crypto.randomUUID(); const threadId = crypto.randomUUID();
     const raw = { found: true, complete: false, state: "ack_reserved", cursor: 4, completion: { completionMessageId, attemptId, milestoneId: "M-1", instructionId, threadId, payloadHash: "a".repeat(64), payload: { instruction_id: instructionId, attempt_id: attemptId, milestone_id: "M-1", files: [], tests: [], blockers: [], last_signal_at: "2026-09-03T00:00:00Z" }, targetPid: 7, targetSocketPath: "/private.sock" }, ack: { messageId: crypto.randomUUID(), transportMessageId: crypto.randomUUID(), subscriptionId: crypto.randomUUID(), targetPid: 7 }, lastEvent: { seq: 4, type: "milestone_ack_send_reserved", at: "2026-09-03T00:00:01Z", completionMessageId, attemptId, targetPid: 7 } };
     const facade = createFacade({ tools: enabled, callTool: async () => raw });
@@ -71,7 +71,7 @@ describe("modern 2026-07-28", () => {
     const first = await facade.handle({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: meta } });
     const second = await facade.handle({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: meta } });
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
-    expect(first.result.ttlMs).toBe(0); expect(first.result.cacheScope).toBe("private"); expect(first.result.tools.map((tool) => tool.name)).toEqual(["peer_targets", "peer_status", "peer_send", "peer_wait", "peer_list_events", "daemon_status"]);
+    expect(first.result.ttlMs).toBe(0); expect(first.result.cacheScope).toBe("private"); expect(first.result.tools.map((tool) => tool.name)).toEqual(["peer_targets", "peer_status", "peer_send", "peer_wait", "peer_list_events", "daemon_status", "peer_inbox", "peer_inbox_ack"]);
     const call = await facade.handle({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { _meta: meta, name: "daemon_status", arguments: {} } }); expect(call.result.structuredContent.running).toBe(true);
     const serialized = JSON.stringify(call); expect(serialized).not.toContain("token"); expect(serialized).not.toContain("socketPath"); expect(serialized).not.toContain("argv");
   });

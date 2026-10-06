@@ -1,12 +1,14 @@
 import { publicToolError, publicToolFailure, redactPublic } from "./redact.mjs";
 import { projectSchema, validateSchema } from "./schema-validator.mjs";
 import { publicResultSchema } from "./tools.mjs";
+import { BUILD_ID } from "../core/build-identity.mjs";
+import { inputDiagnostic } from "./input-diagnostics.mjs";
 
 export const MODERN_VERSION = "2026-07-28";
 export const PROTOCOL_KEY = "io.modelcontextprotocol/protocolVersion";
 export const CLIENT_CAPS_KEY = "io.modelcontextprotocol/clientCapabilities";
 export const SERVER_INFO_KEY = "io.modelcontextprotocol/serverInfo";
-export const SERVER_INFO = Object.freeze({ name: "universal-peer-mcp", version: "0.1.0" });
+export const SERVER_INFO = Object.freeze({ name: "universal-peer-mcp", version: `0.1.1+${BUILD_ID}` });
 
 export async function handleModern(request, { tools, callTool }) {
   if (request.id === undefined) return null;
@@ -21,7 +23,8 @@ export async function handleModern(request, { tools, callTool }) {
   if (request.method !== "tools/call") return error(request.id, -32601, "method not found");
   const tool = tools.find((candidate) => candidate.name === request.params?.name);
   const args = request.params?.arguments ?? {};
-  if (!tool || !plain(args) || !validateSchema(tool.inputSchema, args).valid) return error(request.id, -32602, "invalid tools/call parameters");
+  const diagnostic = inputDiagnostic(tool, args);
+  if (diagnostic) return error(request.id, -32602, `invalid tools/call parameters: ${diagnostic}`);
   try {
     const value = publicResult(tool, await callTool(request.params.name, request.params.arguments ?? {}));
     return result(request.id, { resultType: "complete", structuredContent: value, content: [{ type: "text", text: summary(request.params.name, value) }] });
@@ -40,5 +43,5 @@ function publicResult(tool, raw) {
 function result(id, value) { return { jsonrpc: "2.0", id, result: { ...value, _meta: { [SERVER_INFO_KEY]: SERVER_INFO } } }; }
 function error(id, code, message, data) { return { jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } }; }
 function plain(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
-function summary(name, value) { if (name === "peer_send") return value.replay ? "앞서 기록한 전송 결과입니다." : "메시지를 한 번 전송했습니다."; if (name === "peer_wait") return value.timedOut ? "기다리는 동안 새 상태가 없었습니다." : "요청한 상태를 받았습니다."; return `${name} 결과`; }
+function summary(name, value) { if (name === "peer_send") return value.replay ? "앞서 기록한 전송 결과입니다." : "소켓 쓰기를 마쳤습니다. 수신·ACK는 아직 확인하지 않았습니다."; if (name === "peer_wait") return value.timedOut ? "이번 대기 시간이 끝났습니다. 전송 실패를 뜻하지 않으며, 같은 messageId로 peer_wait를 다시 호출할 수 있습니다." : "요청한 상태를 받았습니다."; return `${name} 결과`; }
 function codedError(code, message) { const error = new Error(message); error.code = code; return error; }

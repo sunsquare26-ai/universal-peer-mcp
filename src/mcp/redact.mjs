@@ -1,4 +1,5 @@
 import os from "node:os";
+import { targetDiagnostic } from "../core/target-diagnostics.mjs";
 
 const SENSITIVE_KEYS = new Set(["token", "secret", "password", "passwd", "credential", "authorization", "apikey", "privatekey", "secretkey", "key", "argv", "socket", "socketpath"]);
 const SOCKET_PATH = /\/(?:[^/\s"'`]+\/)*[^/\s"'`]+\.sock\b/g;
@@ -26,6 +27,8 @@ export function redactPublic(value) {
 }
 
 export function publicToolFailure(cause) {
+  const diagnostic = targetDiagnostic(cause?.diagnostic);
+  if (cause?.code === "TARGET_UNAVAILABLE" && diagnostic) return { reason: "target_unavailable", diagnostic };
   return ({
     INVALID_PUBLIC_RESULT: { reason: "invalid_public_result" },
     MESSAGE_ID_CONFLICT: { reason: "message_id_conflict" },
