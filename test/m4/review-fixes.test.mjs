@@ -227,6 +227,16 @@ test("operator(interactive-tty): the phrase typed at a terminal outside any sess
   expect(wrong.prompted).toBe(true); expect(wrong.error).toMatchObject({ code: "OPERATOR_CONFIRM_MISMATCH" }); expect(wrong.error.message).toContain("CONFIRM test-claude-1");
   const pasted = await L.detached(["unregister", "--alias", "test-claude-1"], "universal-peer-mcp unregister --alias test-codex-1");
   expect(pasted.error.message).toContain("한 줄씩");
+  // The audit boundary: a phrase refused at the terminal never reaches the daemon (no row, no
+  // removal); a caller that skips the CLI and sends a wrong phrase is refused by the daemon and
+  // recorded as operator_refused (reason confirm_mismatch). The ledger records requests that
+  // reached the daemon, not every keystroke at a terminal.
+  expect((await L.events()).filter((e) => e.type === "operator_refused" && e.reason === "confirm_mismatch")).toHaveLength(0);
+  expect((await L.events()).some((e) => e.type === "peer_unregistered")).toBe(false);
+  const control = JSON.stringify(path.resolve(import.meta.dir, "../../src/core/control.mjs"));
+  const bypass = await L.detachedEval(`const { controlCall } = await import(${control}); try { await controlCall("peer_unregister", { alias: "test-claude-1", operator: { confirm: "CONFIRM someone-else" } }); } catch (e) { console.log(JSON.stringify({ ok: false, code: e.code })); }`);
+  expect(bypass.error).toMatchObject({ code: "OPERATOR_REQUIRED" });
+  expect((await L.events()).filter((e) => e.type === "operator_refused").map((e) => e.reason)).toContain("confirm_mismatch");
   expect((await L.detached(["unregister", "--alias", "test-claude-1"], "CONFIRM test-claude-1")).json).toEqual({ removed: true, alias: "test-claude-1", kind: "claude" });
   const m = await post(L, x1, "test-codex-1", "to self");
   const seq = (await x1.run(["inbox"])).json.events[0].seq;

@@ -44,6 +44,8 @@ export async function lane() {
     // CODEX_THREAD_ID is removed from its environment. With a phrase it runs under script(1) (a pty and
     // a controlling terminal) and the phrase is typed; without one it has no terminal at all.
     async detached(argv, phrase = null) { return runDetached(argv, env, phrase); },
+    // A script run the same way (own terminal, outside any session) — a caller that skips the CLI.
+    async detachedEval(code) { return runDetached([], env, null, [process.execPath, "-e", code]); },
     async stop() {
       for (const s of sessionsList.splice(0)) await s.close();
       await stopDaemon(root);
@@ -129,15 +131,16 @@ async function runOperator(argv, env, phrase) {
   return { code, json, error, prompted: typed };
 }
 
-async function runDetached(argv, env, phrase) {
+async function runDetached(argv, env, phrase, program = null) {
   const cli = path.resolve(here, "../../src/cli.mjs");
   const clean = { ...env }; delete clean.CODEX_THREAD_ID;
   const dir = await fsp.realpath(await fsp.mkdtemp("/private/tmp/upm4d-"));
   const fifo = path.join(dir, "in"); const out = path.join(dir, "out"); const rc = path.join(dir, "rc");
   const q = (a) => `'${String(a).replace(/'/g, "'\\''")}'`;
-  const command = [process.execPath, cli, ...argv].map(q).join(" ");
+  const command = [...(program ?? [process.execPath, cli]), ...argv].map(q).join(" ");
   let body;
-  if (phrase === null) body = `${command} < /dev/null > ${q(out)} 2>&1`;
+  if (phrase === null && program) body = `/usr/bin/script -q /dev/null ${command} < /dev/null > ${q(out)} 2>&1`;
+  else if (phrase === null) body = `${command} < /dev/null > ${q(out)} 2>&1`;
   else { execFileSync("/usr/bin/mkfifo", ["-m", "600", fifo]); body = `/bin/cat ${q(fifo)} | /usr/bin/script -q /dev/null ${command} > ${q(out)} 2>&1`; }
   const launcher = spawn("/bin/sh", ["-c", `( ${body}; echo $? > ${q(rc)} ) < /dev/null > /dev/null 2>&1 & exit 0`], { env: clean, stdio: "ignore" });
   await new Promise((r) => launcher.on("close", r));
