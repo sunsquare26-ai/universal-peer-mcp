@@ -194,13 +194,16 @@ export class CodexWake {
   // CLI queue the doorbell waits for the turn to end and the answer says so
   // (`held_behind_running_turn`). Never retried here: an attempt with no clear answer is
   // DELIVERY_UNCERTAIN, and the same messageId answers from the reservation afterwards.
-  async wake({ codexAlias, messageId, target: given = null }) {
+  // `attemptKey` (M5): the reservation's key. It is the messageId, except for a doorbell rung after
+  // the Owner relinked the message to another thread: that is a new attempt at a new thread, and a
+  // success recorded for the old one must not answer for it. The doorbell text always names messageId.
+  async wake({ codexAlias, messageId, target: given = null, attemptKey = messageId }) {
     if (given !== null) given = Object.freeze({ ...given });
-    if (!UUID_LOWER.test(messageId ?? "")) throw fail("TARGET_UNAVAILABLE");
+    if (!UUID_LOWER.test(messageId ?? "") || !UUID_LOWER.test(attemptKey ?? "")) throw fail("TARGET_UNAVAILABLE");
     if (this.authorize) { const verdict = await this.authorize(codexAlias, messageId); if (verdict !== true) throw fail(typeof verdict === "string" ? verdict : "WAKE_NOT_AUTHORIZED"); }
     const directory = path.join(this.root, "codex-wake"); await ensurePrivateDirectory(directory);
-    const file = path.join(directory, messageId + ".json");
-    const hash = crypto.createHash("sha256").update(JSON.stringify([codexAlias, messageId])).digest("hex");
+    const file = path.join(directory, attemptKey + ".json");
+    const hash = crypto.createHash("sha256").update(JSON.stringify([codexAlias, attemptKey])).digest("hex");
     let reservation;
     try { reservation = await fsp.open(file, "wx", 0o600); }
     catch (error) {
@@ -224,7 +227,7 @@ export class CodexWake {
           await this.enqueue(target, bell);
           return { accepted: true, mode: state === "active" ? "held_behind_running_turn" : "queued", turnId: null, replay: false };
         }
-        const params = { threadId: target.threadId, clientUserMessageId: messageId, input: [{ type: "text", text: bell, text_elements: [] }] };
+        const params = { threadId: target.threadId, clientUserMessageId: attemptKey, input: [{ type: "text", text: bell, text_elements: [] }] };
         let method = "turn/start";
         if (state === "active") {
           if (!activeTurnId) throw fail("TARGET_UNAVAILABLE");

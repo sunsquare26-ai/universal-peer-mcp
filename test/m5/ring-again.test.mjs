@@ -134,3 +134,48 @@ test("a message the Owner relinks is rung at its new session, once (measured: a 
   expect(await s.service.ringRelinked(old.messageId)).toBeNull();
   expect(s.rows("doorbell_relink_ring")).toHaveLength(1);
 });
+
+// Review of 0584332: the previous session's success must not stand for the session the message was
+// moved to. `core` mimics PeerCore.send: a transport id already reserved replays and writes nothing.
+describe("relink generations", () => {
+  async function standCore() {
+    const root = await fs.realpath(await fs.mkdtemp(path.join("/private/tmp", "upm5g-"))); roots.push(root); await fs.chmod(root, 0o700);
+    const store = new EventStore(statePaths(root)); await store.init();
+    const writes = []; const reserved = new Map(); let current = S1;
+    const service = new DoorbellService({ store, root, settings: { codexCli: { value: null }, codexAppServerSocket: { value: null } }, codexPeers: () => ({}), claudePeers: () => ({ "c-1": { sessionId: current } }),
+      sendClaude: async ({ messageId }) => { if (reserved.has(messageId)) return { replay: true, status: "written" }; reserved.set(messageId, current); writes.push([messageId, current]); return {}; } });
+    return { store, service, writes, move: (s) => { current = s; } };
+  }
+  test("sent at S1, alias moved to S2, relinked: written to S2 under a new transport id", async () => {
+    const g = await standCore();
+    const p = await g.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "c-1", recipientKind: "claude", recipientSessionId: S1 });
+    await g.service.ring(p.messageId, { first: true });
+    g.move(S2);
+    await g.store.append("peer_post_relinked", { messageId: p.messageId, recipient: "c-1", recipientSessionId: S2 });
+    expect((await g.service.ringRelinked(p.messageId)).state).toBe("sent");
+    expect(g.writes.map(([, s]) => s)).toEqual([S1, S2]);
+    expect(new Set(g.writes.map(([id]) => id)).size).toBe(2);
+  });
+  test("the same move is rung once, even twice at once; a second move is rung again", async () => {
+    const g = await standCore();
+    const p = await g.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "c-1", recipientKind: "claude", recipientSessionId: S2 });
+    g.move(S1);
+    await g.store.append("peer_post_relinked", { messageId: p.messageId, recipient: "c-1", recipientSessionId: S1 });
+    const both = await Promise.all([g.service.ringRelinked(p.messageId), g.service.ringRelinked(p.messageId)]);
+    expect(both.filter(Boolean)).toHaveLength(1);
+    const S3 = "30000000-3312-4e8d-8e25-18f525d75bb2"; g.move(S3);
+    await g.store.append("peer_post_relinked", { messageId: p.messageId, recipient: "c-1", recipientSessionId: S3 });
+    expect((await g.service.ringRelinked(p.messageId)).state).toBe("sent");
+    expect(g.writes.map(([, s]) => s)).toEqual([S1, S3]);
+    expect(g.store.events.filter((e) => e.type === "doorbell_relink_ring")).toHaveLength(2);
+  });
+});
+
+test("moving a message to the session it is already bound to is refused (not a move)", async () => {
+  const { relinkPost } = await import("../../src/core/posts.mjs");
+  const s = await stand();
+  const p = await s.store.append("peer_post", { messageId: crypto.randomUUID(), recipient: "c-1", recipientKind: "claude", recipientSessionId: S2 });
+  await expect(relinkPost(s.store, { messageId: p.messageId, identity: { kind: "claude", sessionId: S2 } })).rejects.toMatchObject({ code: "ALREADY_BOUND" });
+  expect((await relinkPost(s.store, { messageId: p.messageId, identity: { kind: "claude", sessionId: S1 } })).relinked).toBe(true);
+  await expect(relinkPost(s.store, { messageId: p.messageId, identity: { kind: "claude", sessionId: S1 } })).rejects.toMatchObject({ code: "ALREADY_BOUND" });
+});

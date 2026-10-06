@@ -158,3 +158,18 @@ test("a dead socket and a foreign-mode socket are skipped; the live one that lis
     expect(tried).toEqual(["dead.sock", "live.sock"]);               // open.sock (0666) never connected
   } finally { closeA(); closeB(); }
 });
+
+test("M5: a relinked doorbell is a new attempt — a success recorded for the old thread does not answer for it", async () => {
+  const r = await root(); const server = await appServerTarget(r); const log = []; const id = crypto.randomUUID(); const relinked = crypto.randomUUID();
+  try {
+    const wake = new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.159.0", calls: log }) });
+    expect(await wake.wake({ codexAlias: "codex-main", messageId: id })).toMatchObject({ mode: "started", replay: false });
+    expect(await wake.wake({ codexAlias: "codex-main", messageId: id })).toMatchObject({ replay: true });
+    const again = await wake.wake({ codexAlias: "codex-main", messageId: id, attemptKey: relinked });
+    expect(again).toMatchObject({ mode: "started", replay: false });
+    const starts = log.filter(([m]) => m === "turn/start").map(([, p]) => p);
+    expect(starts).toHaveLength(2);
+    expect(starts[1].input).toEqual([{ type: "text", text: bell(id), text_elements: [] }]);   // still names the message
+    expect(starts[1].clientUserMessageId).toBe(relinked);
+  } finally { server.close(); }
+});

@@ -92,6 +92,12 @@ export class DoorbellService {
     }
     return this.relinkCache.map;
   }
+  // Which relink generation a post is in: 0 as accepted, else the seq of the Owner's latest relink.
+  // Each generation is a separate delivery attempt with its own transport ids, so a success at the
+  // previous session never stands for the session the message was moved to.
+  generationOf(post) { return this.#relinks().get(String(post.messageId).toLowerCase())?.seq ?? 0; }
+  attemptKeyOf(post) { const g = this.generationOf(post); return g ? uuidv5(`doorbell:${post.messageId.toLowerCase()}:relink:${g}`) : post.messageId; }
+  claudeTransportIdOf(post) { const g = this.generationOf(post); return g ? uuidv5(`doorbell:${post.messageId.toLowerCase()}:relink:${g}`) : uuidv5(`doorbell:${post.messageId}`); }
   bindingOf(post) {
     const codex = post.recipientKind === "codex";
     const relink = this.#relinks().get(String(post.messageId).toLowerCase());
@@ -114,7 +120,9 @@ export class DoorbellService {
   }
 
   async ring(messageId, { first = false, retry = false } = {}) {
-    if (this.running.has(messageId)) return this.running.get(messageId);
+    const known = this.post(messageId);
+    const runKey = `${messageId}:${known ? this.generationOf(known) : 0}`;
+    if (this.running.has(runKey)) return this.running.get(runKey);
     const job = (async () => {
       const post = this.post(messageId);
       if (!post || !["codex", "claude"].includes(post.recipientKind)) return { state: "not_applicable" };
@@ -128,7 +136,7 @@ export class DoorbellService {
       if (post.recipientKind === "claude") return this.#ringClaude(post);
       if (!this.configured()) return this.#record(post, "not_sent", { errorCode: "DOORBELL_NOT_CONFIGURED" });
       try {
-        const result = await this.wake.wake({ codexAlias: post.recipient, messageId: post.messageId, target: this.targetFor(post) });
+        const result = await this.wake.wake({ codexAlias: post.recipient, messageId: post.messageId, target: this.targetFor(post), attemptKey: this.attemptKeyOf(post) });
         const state = result.mode === "held_behind_running_turn" ? "held" : "sent";
         return this.#record(post, state, { mode: result.mode, ...(result.turnId ? { turnId: result.turnId } : {}), ...(result.replay ? { replay: true } : {}) });
       } catch (error) {
@@ -138,8 +146,8 @@ export class DoorbellService {
         return this.#record(post, "not_sent", { errorCode: c });
       }
     })();
-    this.running.set(messageId, job);
-    try { return await job; } finally { this.running.delete(messageId); }
+    this.running.set(runKey, job);
+    try { return await job; } finally { this.running.delete(runKey); }
   }
 
   // Claude: one fixed line through the native session socket (the path peer_send uses), under an id
@@ -152,7 +160,7 @@ export class DoorbellService {
       // restart) is replayed byte for byte: the wording whose request hash the reservation holds is
       // looked up among every wording ever sent. A reservation matching none is not re-sent with
       // something else — it is recorded unknown for a hand.
-      const derived = uuidv5(`doorbell:${post.messageId}`);
+      const derived = this.claudeTransportIdOf(post);
       let prior = null; try { prior = typeof this.store.request === "function" ? this.store.request(derived) : null; } catch {}
       let line = claudeDoorbell(post.messageId);
       if (prior) {
@@ -198,7 +206,7 @@ export class DoorbellService {
   async sweep() {
     const report = { intentsCreated: 0, retried: 0, exhausted: 0, alerted: 0 };
     for (const post of this.store.events.filter((e) => e.type === "peer_post" && ["codex", "claude"].includes(e.recipientKind))) {
-      if (this.processed(post.messageId) || this.running.has(post.messageId)) continue;
+      if (this.processed(post.messageId) || [...this.running.keys()].some((k) => k.startsWith(`${post.messageId}:`))) continue;
       const intent = this.intent(post.messageId); const outcome = this.outcome(post.messageId);
       if (!intent) { report.intentsCreated += 1; await this.ring(post.messageId, { first: true }); continue; }
       if (!outcome) {
@@ -242,7 +250,7 @@ export class DoorbellService {
   eligibleAgain(post, index = this.againIndex()) {
     const id = post.messageId.toLowerCase();
     const outcomes = index.outcomes.get(id) ?? [];
-    if (!outcomes.length || outcomes.some((e) => e.state !== "not_sent") || DoorbellService.QUIET.has(outcomes[0].errorCode) || index.closed.has(id) || this.running.has(post.messageId)) return false;
+    if (!outcomes.length || outcomes.some((e) => e.state !== "not_sent") || DoorbellService.QUIET.has(outcomes[0].errorCode) || index.closed.has(id) || [...this.running.keys()].some((k) => k.startsWith(`${post.messageId}:`))) return false;
     const current = post.recipientKind === "codex" ? this.codexPeers()?.[post.recipient]?.threadId : post.recipientKind === "claude" ? this.claudePeers()?.[post.recipient]?.sessionId : null;
     return typeof current === "string" && sameUuid(current, this.bindingOf(post) ?? "");
   }
@@ -277,7 +285,10 @@ export class DoorbellService {
   // (`doorbell_relink_ring` is the record), so the session that now holds it knows. Never the body.
   async ringRelinked(messageId) {
     const post = this.post(messageId); if (!post || this.processed(messageId)) return null;
-    try { await this.store.appendChecked("doorbell_relink_ring", { messageId: post.messageId, recipient: post.recipient, threadId: this.bindingOf(post) }, (events) => (events.some((e) => e.type === "peer_post_processed" && sameUuid(e.messageId, messageId)) ? Object.assign(new Error("processed"), { code: "DUP" }) : null)); }
+    // Once per relink generation: A -> B and then B -> C are two moves and each is rung; the same
+    // move is never rung twice, across concurrent calls and restarts (the claim is a ledger row).
+    const generation = this.generationOf(post); if (!generation) return null;
+    try { await this.store.appendChecked("doorbell_relink_ring", { messageId: post.messageId, recipient: post.recipient, threadId: this.bindingOf(post), relinkSeq: generation }, (events) => (events.some((e) => (e.type === "peer_post_processed" && sameUuid(e.messageId, messageId)) || (e.type === "doorbell_relink_ring" && sameUuid(e.messageId, messageId) && e.relinkSeq === generation)) ? Object.assign(new Error("claimed"), { code: "DUP" }) : null)); }
     catch (error) { if (error.code === "DUP") return null; throw error; }
     return this.ring(post.messageId, {});
   }
