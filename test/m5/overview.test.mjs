@@ -51,3 +51,9 @@ test("misopened with no automatic retry left promises nothing automatic (review 
   expect(text).not.toContain("자동으로 한 번 더");
   expect(text).toContain("inbox 로 밀린 메시지를 확인");
 });
+
+test("a misopened session gets one note, not a second one promising a ring on any command", () => {
+  const text = renderOverview(overview({ events, peers, presence: new Map([["c-1", "misopened"]]), presenceReason: new Map([["c-1", "argv_executable_mismatch"]]), eligible: () => true, now: NOW }), NOW);
+  expect(text).toContain("자동으로 한 번 더 갑니다");
+  expect(text).not.toContain("이 세션이 다시 무엇이든 실행하면");
+});
