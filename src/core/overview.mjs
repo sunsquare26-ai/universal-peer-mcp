@@ -80,7 +80,7 @@ export function renderOverview(view, now = Date.now()) {
   lines.push(fmt(head), ...body.map(fmt));
   const notes = [];
   for (const p of view.peers) {
-    if (p.present === "misopened") notes.push(`- ${p.alias}: 켜져 있지만 알림을 받을 수 없는 방식으로 열려 있습니다(${p.presentReason ?? "?"}). 그 탭에서 /exit 한 뒤 한 줄: universal-peer-mcp open ${p.alias} — 다시 열리면 밀린 알림이 자동으로 갑니다.`);
+    if (p.present === "misopened") notes.push(`- ${p.alias}: 켜져 있지만 알림을 받을 수 없는 방식으로 열려 있습니다(${p.presentReason ?? "?"}). 그 탭에서 /exit 한 뒤 한 줄: universal-peer-mcp open ${p.alias}${p.autoRetry ? ` — 다시 열리면 알림이 못 간 ${p.autoRetry}건은 자동으로 한 번 더 갑니다.` : p.unprocessed ? " — 다시 연 뒤 그 세션에서 universal-peer-mcp inbox 로 밀린 메시지를 확인하세요." : ""}`);
     const manual = p.undelivered - p.autoRetry;
     if (p.autoRetry) notes.push(`- ${p.alias}: 알림이 못 간 메시지 ${p.autoRetry}건은 이 세션이 다시 무엇이든 실행하면 자동으로 한 번 더 알립니다.`);
     if (manual > 0 || p.uncertain) notes.push(`- ${p.alias}: 자동 재알림 대상이 아닌 미전달 ${manual}건${p.uncertain ? `, 전달 불확실 ${p.uncertain}건` : ""}. 세션을 열어 inbox 로 확인하세요: universal-peer-mcp open ${p.alias}`);

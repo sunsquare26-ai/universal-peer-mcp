@@ -245,15 +245,16 @@ export class DoorbellService {
     }
     return report;
   }
-  // M5 F2: ring again, once, when the recipient comes back. A doorbell refused before it went out
+  // M5 F2: ring again when the recipient comes back and a write to it would land (the daemon asks
+  // PeerCore.reachable first), at most MAX_RERINGS times per message. A doorbell refused before it went out
   // (not_sent) left the message waiting for a session that was not there; the session that later
   // proves it is there — by running any authenticated command, or (Claude) by reappearing in the
   // session registry — gets that doorbell one more time. Only not_sent, never sent/held/unknown (those
   // may already have reached it); only while unprocessed and still bound to the session that is back;
-  // once per message (`doorbell_rering` is the record). The body is never sent again.
+  // each attempt recorded as `doorbell_rering`. The body is never sent again.
   // Eligible only if every doorbell outcome recorded for the message was not_sent (never sent, held
   // or unknown — any of those may already have reached it), the first one not for a quiet reason,
-  // never re-rung, unprocessed, and bound to the session that is back.
+  // re-rung fewer than MAX_RERINGS times, unprocessed, and bound to the session that is back.
   static QUIET = new Set(["DOORBELL_NOT_CONFIGURED", "WAKE_ALREADY_PROCESSED", "WAKE_TARGET_MISMATCH"]);
   static MAX_RERINGS = 2;
   // One pass over the ledger for the questions below (status and the triggers ask them per post).

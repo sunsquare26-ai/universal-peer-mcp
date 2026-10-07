@@ -44,3 +44,10 @@ test("a session opened the wrong way is named, with the one command that fixes i
   expect(text).toContain("잘못 열림");
   expect(text).toContain("universal-peer-mcp open c-1");
 });
+
+test("misopened with no automatic retry left promises nothing automatic (review of 83b4c8d)", () => {
+  const text = renderOverview(overview({ events, peers, presence: new Map([["c-1", "misopened"]]), presenceReason: new Map([["c-1", "argv_executable_mismatch"]]), eligible: () => false, now: NOW }), NOW);
+  expect(text).toContain("universal-peer-mcp open c-1");
+  expect(text).not.toContain("자동으로 한 번 더");
+  expect(text).toContain("inbox 로 밀린 메시지를 확인");
+});
