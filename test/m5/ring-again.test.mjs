@@ -231,3 +231,25 @@ test("the Claude sender is told which session the attempt is for", async () => {
   await s.service.ring(p.messageId, { first: true });
   expect(seen).toBe(S1);
 });
+
+describe("misopened sessions (measured 2026-10-07: a re-ring spent on argv_executable_mismatch)", () => {
+  test("PeerCore.reachable answers without a ledger row and names the resolver's reason", async () => {
+    const { PeerCore } = await import("../../src/core/peer-core.mjs");
+    const rows = []; const store = { append: async (t, d) => { rows.push({ type: t, ...d }); return {}; } };
+    const ok = new PeerCore({ targets: { "c-1": { sessionId: S1 } }, store, address: "uds:/x.sock", resolver: async () => ({ sessionId: S1 }) });
+    expect(await ok.reachable("c-1")).toEqual({ reachable: true, reason: null });
+    const bad = new PeerCore({ targets: { "c-1": { sessionId: S1 } }, store, address: "uds:/x.sock", resolver: async () => { throw new Error("target argv executable mismatch"); } });
+    expect(await bad.reachable("c-1")).toEqual({ reachable: false, reason: "argv_executable_mismatch" });
+    expect(await bad.reachable("nobody")).toEqual({ reachable: false, reason: "unknown_alias" });
+    expect(rows).toEqual([]);
+  });
+  test("a re-ring that could not land leaves one more chance; at most two", async () => {
+    const s = await stand(); const p = await s.post();   // not_sent while away
+    await s.store.append("doorbell_rering", { messageId: p.messageId, recipient: "c-1", trigger: "registry" });
+    await s.store.append("doorbell_outcome", { messageId: p.messageId, recipient: "c-1", recipientKind: "claude", state: "not_sent", errorCode: "TARGET_UNAVAILABLE" });
+    expect(s.service.eligibleAgain(p)).toBe(true);
+    s.back();
+    expect((await s.service.ringAgain("c-1", { binding: S1, trigger: "activity" })).map((r) => r.state)).toEqual(["sent"]);
+    expect(s.service.eligibleAgain(p)).toBe(false);
+  });
+});

@@ -220,8 +220,19 @@ store.onAppendFailed = (row, error) => {
 // M5 F2: a Claude recipient that was away and is back in the registry gets its refused doorbells
 // rung once more. Liveness is the registry reading every resolver uses (pid and its start time).
 const claudeLiveness = (sessionId) => sessionLiveness(sessionId, claudeSessionsDir ? { sessionsDir: claudeSessionsDir } : {});
+// M5: running is not enough — a session reopened as a bare `claude --resume` (no absolute argv[0],
+// no --permission-mode) is in the registry but cannot be written to. "misopened" says so, with the
+// resolver's reason; only "running" (the resolve a send does would succeed) lets a doorbell be rung
+// again. Measured 2026-10-07: a re-ring spent itself on such a session (argv_executable_mismatch).
+async function claudePresence(alias, sessionId) {
+  const live = await claudeLiveness(sessionId);
+  if (live !== "running") return { state: live, reason: null };
+  const probe = await core.reachable(alias);
+  return probe.reachable ? { state: "running", reason: null } : { state: "misopened", reason: probe.reason };
+}
+const aliasOfClaudeSession = (sessionId) => Object.keys(targets).find((a) => sameUuid(targets[a]?.sessionId ?? "", sessionId)) ?? null;
 const reportRingAgain = (error) => { const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "RING_AGAIN_FAILED"; alerts.raise({ kind: "ring_again_failed", key: `ring_again_failed:${new Date().toISOString().slice(0, 13)}`, code }).catch(() => {}); };
-setInterval(() => { doorbell.ringReturnedClaude(claudeLiveness).catch(reportRingAgain); }, 60 * 1000).unref();
+setInterval(() => { doorbell.ringReturnedClaude(async (sessionId) => { const alias = aliasOfClaudeSession(sessionId); return alias ? (await claudePresence(alias, sessionId)).state : "unknown"; }).catch(reportRingAgain); }, 60 * 1000).unref();
 const sweepDoorbells = () => { doorbell.sweep().catch((error) => { alerts.raise({ kind: "doorbell_hook_failed", key: `doorbell_sweep_failed:${new Date().toISOString().slice(0, 13)}`, code: typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "SWEEP_FAILED" }).catch(() => {}); }); };
 setImmediate(sweepDoorbells);
 setInterval(sweepDoorbells, 5 * 60 * 1000).unref();
@@ -434,7 +445,13 @@ function noticeReturn(who) {
   if (!who?.authenticated) return who;
   const now = Date.now(); if (now - (lastReturnCheck.get(who.alias) ?? 0) < 60_000) return who;
   lastReturnCheck.set(who.alias, now);
-  doorbell.ringAgain(who.alias, { binding: who.kind === "codex" ? who.threadId : who.sessionId, trigger: "activity" }).catch(reportRingAgain);
+  // A Claude session that can authenticate a command may still be unreachable for a write (opened
+  // the wrong way); the ring waits until a send would land, so the one chance is not spent on it.
+  const ring = async () => {
+    if (who.kind === "claude" && !(await core.reachable(who.alias)).reachable) return;
+    await doorbell.ringAgain(who.alias, { binding: who.kind === "codex" ? who.threadId : who.sessionId, trigger: "activity" });
+  };
+  ring().catch(reportRingAgain);
   return who;
 }
 async function identifyCaller(caller) { return noticeReturn(await identifyCallerOnce(caller)); }
@@ -632,11 +649,12 @@ function directory() {
 async function peerOverview() {
   const dir = directory(); const { peers } = dir;
   const started = store.events.find((e) => e.type === "daemon_started" && e.generationId === generationId);
-  const presence = new Map(); for (const p of peers) if (p.kind === "claude") presence.set(p.alias, await claudeLiveness(p.sessionId));
+  const presence = new Map(); const presenceReason = new Map();
+  for (const p of peers) if (p.kind === "claude") { const r = await claudePresence(p.alias, p.sessionId); presence.set(p.alias, r.state); if (r.reason) presenceReason.set(p.alias, r.reason); }
   const index = doorbell.againIndex();
   // The held messages by id, so the hand that moves them has the exact command to type.
   const heldIds = new Map(peers.filter((p) => p.heldForPreviousSession).map((p) => [p.alias, heldPosts(store.events, p.alias, lineageOf(p.kind === "claude" ? { kind: "claude", alias: p.alias, sessionId: p.sessionId } : { kind: "codex", alias: p.alias, threadId: p.threadId })).map((e) => e.messageId)]));
-  return overview({ events: store.events, peers, presence, eligible: (post) => doorbell.eligibleAgain(post, index), heldIds,
+  return overview({ events: store.events, peers, presence, presenceReason, eligible: (post) => doorbell.eligibleAgain(post, index), heldIds,
     held: new Map(peers.filter((p) => p.heldForPreviousSession).map((p) => [p.alias, p.heldForPreviousSession])),
     daemon: { pid: process.pid, buildId: BUILD_ID, startedAt: started?.at ?? null, previousEnd: started?.previousEnd ?? null } });
 }

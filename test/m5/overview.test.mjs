@@ -36,3 +36,24 @@ test("not eligible for the automatic ring is said plainly, not promised (review 
   expect(text).not.toContain("자동으로 한 번 더");
   expect(text).toContain("gone-1(등록 없음)");
 });
+
+test("a session opened the wrong way is named, with the one command that fixes it", () => {
+  const v = overview({ events, peers, presence: new Map([["c-1", "misopened"]]), presenceReason: new Map([["c-1", "argv_executable_mismatch"]]), now: NOW });
+  expect(v.peers[0]).toMatchObject({ present: "misopened", presentReason: "argv_executable_mismatch" });
+  const text = renderOverview(v, NOW);
+  expect(text).toContain("잘못 열림");
+  expect(text).toContain("universal-peer-mcp open c-1");
+});
+
+test("misopened with no automatic retry left promises nothing automatic (review of 83b4c8d)", () => {
+  const text = renderOverview(overview({ events, peers, presence: new Map([["c-1", "misopened"]]), presenceReason: new Map([["c-1", "argv_executable_mismatch"]]), eligible: () => false, now: NOW }), NOW);
+  expect(text).toContain("universal-peer-mcp open c-1");
+  expect(text).not.toContain("자동으로 한 번 더");
+  expect(text).toContain("inbox 로 밀린 메시지를 확인");
+});
+
+test("a misopened session gets one note, not a second one promising a ring on any command", () => {
+  const text = renderOverview(overview({ events, peers, presence: new Map([["c-1", "misopened"]]), presenceReason: new Map([["c-1", "argv_executable_mismatch"]]), eligible: () => true, now: NOW }), NOW);
+  expect(text).toContain("자동으로 한 번 더 갑니다");
+  expect(text).not.toContain("이 세션이 다시 무엇이든 실행하면");
+});

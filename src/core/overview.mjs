@@ -15,7 +15,7 @@
 //                the rest are exhausted or not eligible and need a hand.
 //   held         messages waiting for a previous session of this alias (only the Owner moves them).
 // Aliases no longer registered that still have unprocessed messages are listed under `unregistered`.
-export function overview({ events, peers, held = new Map(), heldIds = new Map(), presence = new Map(), eligible = () => false, now = Date.now(), daemon = null }) {
+export function overview({ events, peers, held = new Map(), heldIds = new Map(), presence = new Map(), presenceReason = new Map(), eligible = () => false, now = Date.now(), daemon = null }) {
   const processed = new Set(); const lastOutcome = new Map(); const lastSeen = new Map(); const generation = new Map();
   const seen = (alias, at) => { if (typeof alias === "string" && (!lastSeen.has(alias) || lastSeen.get(alias) < at)) lastSeen.set(alias, at); };
   for (const e of events) {
@@ -45,6 +45,7 @@ export function overview({ events, peers, held = new Map(), heldIds = new Map(),
       alias: peer.alias, kind: peer.kind,
       session: (peer.sessionId ?? peer.threadId ?? "").slice(0, 8),
       present: peer.kind === "claude" ? (presence.get(peer.alias) ?? "unknown") : "unknown",
+      ...(presenceReason.get(peer.alias) ? { presentReason: presenceReason.get(peer.alias) } : {}),
       lastSeenAt: lastSeen.get(peer.alias) ?? null,
       unprocessed: w.unprocessed, oldestUnprocessedAt: w.oldestAt, undelivered: w.undelivered, uncertain: w.uncertain, autoRetry: w.autoRetry,
       held: held.get(peer.alias) ?? 0, heldIds: heldIds.get(peer.alias) ?? []
@@ -62,7 +63,7 @@ const ago = (iso, now) => {
   const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
   return s < 60 ? `${s}초 전` : s < 3600 ? `${Math.round(s / 60)}분 전` : s < 86400 ? `${Math.round(s / 3600)}시간 전` : `${Math.round(s / 86400)}일 전`;
 };
-const PRESENT = { running: "켜져 있음", not_running: "꺼져 있음", unknown: "확인 불가" };
+const PRESENT = { running: "켜져 있음", not_running: "꺼져 있음", unknown: "확인 불가", misopened: "잘못 열림" };
 
 // The human rendering. One line per alias, then what needs a hand, in plain words.
 export function renderOverview(view, now = Date.now()) {
@@ -79,8 +80,9 @@ export function renderOverview(view, now = Date.now()) {
   lines.push(fmt(head), ...body.map(fmt));
   const notes = [];
   for (const p of view.peers) {
+    if (p.present === "misopened") notes.push(`- ${p.alias}: 켜져 있지만 알림을 받을 수 없는 방식으로 열려 있습니다(${p.presentReason ?? "?"}). 그 탭에서 /exit 한 뒤 한 줄: universal-peer-mcp open ${p.alias}${p.autoRetry ? ` — 다시 열리면 알림이 못 간 ${p.autoRetry}건은 자동으로 한 번 더 갑니다.` : p.unprocessed ? " — 다시 연 뒤 그 세션에서 universal-peer-mcp inbox 로 밀린 메시지를 확인하세요." : ""}`);
     const manual = p.undelivered - p.autoRetry;
-    if (p.autoRetry) notes.push(`- ${p.alias}: 알림이 못 간 메시지 ${p.autoRetry}건은 이 세션이 다시 무엇이든 실행하면 자동으로 한 번 더 알립니다.`);
+    if (p.autoRetry && p.present !== "misopened") notes.push(`- ${p.alias}: 알림이 못 간 메시지 ${p.autoRetry}건은 이 세션이 다시 무엇이든 실행하면 자동으로 한 번 더 알립니다.`);
     if (manual > 0 || p.uncertain) notes.push(`- ${p.alias}: 자동 재알림 대상이 아닌 미전달 ${manual}건${p.uncertain ? `, 전달 불확실 ${p.uncertain}건` : ""}. 세션을 열어 inbox 로 확인하세요: universal-peer-mcp open ${p.alias}`);
     else if (!p.autoRetry && p.unprocessed && p.present === "not_running") notes.push(`- ${p.alias}: 꺼져 있고 미처리 메시지 ${p.unprocessed}건. 열려면: universal-peer-mcp open ${p.alias}`);
     if (p.held) {

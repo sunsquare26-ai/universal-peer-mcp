@@ -34,7 +34,7 @@ Nobody waits in silence:
 
 - If a doorbell cannot reach the recipient, or waits behind a running turn, the sender gets a notice from `universal-peer` in its own inbox.
 - A message sent with `--expect-reply` that is processed without a `--reply-to` answer produces a notice ten minutes later.
-- When a recipient that was away comes back, a doorbell that could not be sent is rung once more. The body is never sent twice.
+- When a recipient that was away comes back and can actually be reached, a doorbell that could not be sent is rung again — at most twice per message. The body is never sent again. A session opened the wrong way (for example a bare `claude --resume`) is shown by `status` as misopened, with the `open` command that fixes it.
 - A daemon that dies leaves `daemon.log` and a `daemon_previous_unclean` or `daemon_crashed` row. Its lock is cleaned up, and the next command starts a fresh daemon.
 
 Updating an install from a clean checkout is one command. It switches only after checks pass, verifies the live daemon, and can be undone:

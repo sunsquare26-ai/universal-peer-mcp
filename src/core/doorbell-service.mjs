@@ -245,25 +245,28 @@ export class DoorbellService {
     }
     return report;
   }
-  // M5 F2: ring again, once, when the recipient comes back. A doorbell refused before it went out
+  // M5 F2: ring again when the recipient comes back and a write to it would land (the daemon asks
+  // PeerCore.reachable first), at most MAX_RERINGS times per message. A doorbell refused before it went out
   // (not_sent) left the message waiting for a session that was not there; the session that later
   // proves it is there — by running any authenticated command, or (Claude) by reappearing in the
   // session registry — gets that doorbell one more time. Only not_sent, never sent/held/unknown (those
   // may already have reached it); only while unprocessed and still bound to the session that is back;
-  // once per message (`doorbell_rering` is the record). The body is never sent again.
+  // each attempt recorded as `doorbell_rering`. The body is never sent again.
   // Eligible only if every doorbell outcome recorded for the message was not_sent (never sent, held
   // or unknown — any of those may already have reached it), the first one not for a quiet reason,
-  // never re-rung, unprocessed, and bound to the session that is back.
+  // re-rung fewer than MAX_RERINGS times, unprocessed, and bound to the session that is back.
   static QUIET = new Set(["DOORBELL_NOT_CONFIGURED", "WAKE_ALREADY_PROCESSED", "WAKE_TARGET_MISMATCH"]);
+  static MAX_RERINGS = 2;
   // One pass over the ledger for the questions below (status and the triggers ask them per post).
   againIndex(events = this.store.events) {
-    const outcomes = new Map(); const closed = new Set();
+    const outcomes = new Map(); const closed = new Set(); const reRings = new Map();
     for (const e of events) {
       const id = typeof e.messageId === "string" ? e.messageId.toLowerCase() : null; if (!id) continue;
       if (e.type === "doorbell_outcome") { const list = outcomes.get(id) ?? []; list.push(e); outcomes.set(id, list); }
-      else if (e.type === "doorbell_rering" || e.type === "peer_post_processed") closed.add(id);
+      else if (e.type === "peer_post_processed") closed.add(id);
+      else if (e.type === "doorbell_rering") reRings.set(id, (reRings.get(id) ?? 0) + 1);
     }
-    return { outcomes, closed };
+    return { outcomes, closed, reRings };
   }
   // Eligible only if every doorbell outcome recorded for the message was not_sent (never sent, held
   // or unknown — any of those may already have reached it), the first one not for a quiet reason,
@@ -274,6 +277,10 @@ export class DoorbellService {
     const id = post.messageId.toLowerCase();
     if (this.generationOf(post) !== 0) return false;   // a relinked message is rung by ringRelinked
     const outcomes = index.outcomes.get(id) ?? [];
+    // At most MAX_RERINGS re-rings per message. The triggers ring only when a write would land now
+    // (the daemon asks PeerCore.reachable first), so a second one is for a return that a first one,
+    // spent before that check existed or lost to a race, did not reach.
+    if ((index.reRings.get(id) ?? 0) >= DoorbellService.MAX_RERINGS) return false;
     if (!outcomes.length || outcomes.some((e) => e.state !== "not_sent") || DoorbellService.QUIET.has(outcomes[0].errorCode) || index.closed.has(id) || [...this.running.keys()].some((k) => k.startsWith(`${post.messageId}:`))) return false;
     const current = post.recipientKind === "codex" ? this.codexPeers()?.[post.recipient]?.threadId : post.recipientKind === "claude" ? this.claudePeers()?.[post.recipient]?.sessionId : null;
     return typeof current === "string" && sameUuid(current, this.bindingOf(post) ?? "");
