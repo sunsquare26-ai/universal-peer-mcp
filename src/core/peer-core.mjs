@@ -62,6 +62,16 @@ export class PeerCore extends EventEmitter {
   // that carries it (src/mcp/tools.mjs).
   targetsList() { return { targets: Object.entries(this.targets).map(([alias, target]) => ({ alias, ...publicTarget(target) })) }; }
 
+  // M5: can a write to this alias land right now? The same resolve a send does, without rebinding,
+  // without a ledger row and without sending — asked by the doorbell's return triggers every minute,
+  // so it must stay quiet. {reachable, reason}.
+  async reachable(alias) {
+    const expected = this.targets[alias];
+    if (!expected) return { reachable: false, reason: "unknown_alias" };
+    try { await this.resolver(expected, this.resolverOptions); return { reachable: true, reason: null }; }
+    catch (error) { return { reachable: false, reason: resolveReason(error) ?? "unrecognised_resolver_failure" }; }
+  }
+
   async status(alias) {
     const expected = this.#target(alias); const target = await this.#resolve(expected, alias);
     if (expected.expectedDisplayName && expected.expectedDisplayName !== target.observedDisplayName) {
