@@ -18,13 +18,13 @@ import { promisify } from "node:util";
 //      claimed after it is observed there.
 //
 // No free text: an alert is a kind, a key and a closed set of short codes. No body, no path.
-export const ALERT_KINDS = Object.freeze(["ledger_poisoned", "ledger_append_failed", "archive_failed", "archive_late_rows", "backup_failed", "retention_stopped", "retention_unprocessed", "doorbell_unknown", "doorbell_not_sent", "doorbell_hook_failed", "attempt_outcome_unrecorded"]);
+export const ALERT_KINDS = Object.freeze(["ledger_poisoned", "ledger_append_failed", "archive_failed", "archive_late_rows", "backup_failed", "retention_stopped", "retention_unprocessed", "doorbell_unknown", "doorbell_not_sent", "doorbell_hook_failed", "attempt_outcome_unrecorded", "github_relay_needed"]);
 const KEY = /^[a-z0-9_:.-]{1,160}$/;
 const CODE = /^[A-Za-z0-9_.:-]{1,64}$/;
 const run = promisify(execFile);
 
 export class AlertSink {
-  constructor({ file, command = null, exec = run }) { this.file = file; this.command = command; this.exec = exec; this.keys = null; this.last = null; this.lastCommand = null; }
+  constructor({ file, command = null, exec = run }) { this.file = file; this.command = command; this.exec = exec; this.keys = null; this.last = null; this.lastCommand = null; this.inflight = new Map(); }
 
   async #load() {
     if (this.keys) return;
@@ -34,7 +34,17 @@ export class AlertSink {
     } catch (error) { if (error.code !== "ENOENT") throw error; }
   }
 
-  async raise({ kind, key, code = null }) {
+  // One raise per key at a time: a second caller for the same key while the first is still writing
+  // shares its result instead of passing the "already raised" check too.
+  raise(alert) {
+    const key = alert?.key;
+    if (typeof key === "string" && this.inflight.has(key)) return this.inflight.get(key);
+    const job = this.#raise(alert).finally(() => this.inflight.delete(key));
+    if (typeof key === "string") this.inflight.set(key, job);
+    return job;
+  }
+
+  async #raise({ kind, key, code = null }) {
     if (!ALERT_KINDS.includes(kind) || !KEY.test(key) || (code !== null && !CODE.test(code))) throw Object.assign(new Error("invalid alert"), { code: "INVALID_ALERT" });
     await this.#load();
     if (this.keys.has(key)) return { raised: false, duplicate: true };

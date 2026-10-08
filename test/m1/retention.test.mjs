@@ -28,8 +28,8 @@ async function stand() {
 test("the ledger row keeps no free text of the body, only the allowlisted header", async () => {
   const s = await stand();
   const a = await s.add("peer_frame_uncorrelated", "김서연 직원 OTP 481927\n둘째 줄", { reason: "no_reply_marker" });
-  const b = await s.add("peer_frame_uncorrelated", "PEER_ACK re=14e6f292 note=김서연\n본문", { reason: "no_reply_marker" });
-  expect(a.header).toBeUndefined(); expect(b.header).toEqual({ verb: "PEER_ACK", replyTo: "14e6f292" });
+  const b = await s.add("peer_frame_uncorrelated", "PEER_ACK re=a2000000 note=김서연\n본문", { reason: "no_reply_marker" });
+  expect(a.header).toBeUndefined(); expect(b.header).toEqual({ verb: "PEER_ACK", replyTo: "a2000000" });
   const ledger = await fsp.readFile(statePaths(s.root).events, "utf8");
   for (const leak of ["김서연", "481927", "둘째 줄", "본문"]) expect(ledger).not.toContain(leak);
 });

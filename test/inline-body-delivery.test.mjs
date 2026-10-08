@@ -17,8 +17,8 @@ import { redactPublic } from "../src/mcp/redact.mjs";
 import { projectSchema, validateSchema } from "../src/mcp/schema-validator.mjs";
 import { publicResultSchema, toolDefinitions } from "../src/mcp/tools.mjs";
 
-const REPLY_TO = "14e6f292-e7c0-450b-8181-86c256803ec6";
-const THREAD = "9f9f218b-7474-40df-a166-e37d9bcf1a84";
+const REPLY_TO = "a2000000-0000-4000-8000-000000000002";
+const THREAD = "a4000000-0000-4000-8000-000000000004";
 const PEER = { pid: 47687, procStart: "Fri Sep 11 01:14:58 2026" };
 
 // A body this daemon really spooled on 2026-09-11, verbatim. The first two lines are from
@@ -28,7 +28,7 @@ const PEER = { pid: 47687, procStart: "Fri Sep 11 01:14:58 2026" };
 // shape the receiver has to be able to read, and it is what pins the cost of the redaction the
 // public surface applies to every string it publishes.
 const REAL_BODY = [
-  "PEER_REPLY re=34acbf18-1860-49b5-b4c3-d3c940fc32e9 verdict=pass",
+  "PEER_REPLY re=a3000000-0000-4000-8000-000000000003 verdict=pass",
   "",
   "**이 메시지가 제 형식 수정의 시험입니다. 첫 줄에 토큰만 두고 본문을 둘째 줄부터 씁니다.**",
   `**감수 완료. 파일 \`/Users/x/workspace/var/work/claude/CLAUDE-REVIEW.md\` sha256 \`${"8".repeat(64)}\` 34,637 bytes.**`
@@ -65,7 +65,7 @@ describe("the spooled body is carried in the answer", () => {
   test("a correlated reply answers with the text, not only the file name", async () => {
     // Tokens only on the first line and the body from the second, which is the form that produced
     // the one correlated frame in the ledger (seq 2474, `evidence: "inband_header"`).
-    const body = `PEER_REPLY re=14e6f292 verdict=pass\n본문이 둘째 줄에 있습니다\n셋째 줄`;
+    const body = `PEER_REPLY re=a2000000 verdict=pass\n본문이 둘째 줄에 있습니다\n셋째 줄`;
     await onFrame(envelope(body), PEER, {});
     const [row] = rows("peer_reply");
     const [hydrated] = await hydrate([row]);
@@ -228,7 +228,7 @@ describe("the body reaches a caller through the published contract", () => {
 
   test("a real spooled body survives, and the absolute path inside it is redacted as every published path is", () => {
     const published = publish("peer_list_events", { cursor: 1, events: [row({ body: REAL_BODY, bodyInlineBytes: Buffer.byteLength(REAL_BODY) })] }).events[0];
-    expect(published.body).toStartWith("PEER_REPLY re=34acbf18-1860-49b5-b4c3-d3c940fc32e9 verdict=pass\n");
+    expect(published.body).toStartWith("PEER_REPLY re=a3000000-0000-4000-8000-000000000003 verdict=pass\n");
     expect(published.body).toContain("첫 줄에 토큰만 두고 본문을 둘째 줄부터 씁니다");
     expect(published.body).toContain("8".repeat(64));
     expect(published.body).toContain("34,637 bytes");

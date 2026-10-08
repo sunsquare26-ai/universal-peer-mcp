@@ -77,3 +77,9 @@ test("--test sends the fixed test text", async () => {
   expect(s.run("--test").status).toBe(0);
   expect((await s.calls())[0][7]).toBe(EVENTS("UniversalPeer 경보 시험"));
 });
+
+test("github_relay_needed: the notification names the remote to pass a message to, nothing else", async () => {
+  const s = await stand([0]);
+  expect(s.run("universal-peer", "github_relay_needed", `github_relay_needed:egg:${ID}`, "codex-cloud").status).toBe(0);
+  expect((await s.calls())[0][7]).toBe(EVENTS("UniversalPeer: codex-cloud 에게 GitHub 방 메시지 전달 필요"));
+});

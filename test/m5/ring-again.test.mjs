@@ -9,7 +9,7 @@ import { statePaths } from "../../src/core/state-paths.mjs";
 
 const roots = [];
 afterEach(async () => { for (const r of roots.splice(0)) await fs.rm(r, { recursive: true, force: true }); });
-const S1 = "10000000-3312-4e8d-8e25-18f525d75bb2"; const S2 = "20000000-3312-4e8d-8e25-18f525d75bb2";
+const S1 = "10000000-0000-4000-8000-0000000000aa"; const S2 = "20000000-0000-4000-8000-0000000000aa";
 
 async function stand() {
   const root = await fs.realpath(await fs.mkdtemp(path.join("/private/tmp", "upm5r-"))); roots.push(root); await fs.chmod(root, 0o700);
@@ -163,7 +163,7 @@ describe("relink generations", () => {
     await g.store.append("peer_post_relinked", { messageId: p.messageId, recipient: "c-1", recipientSessionId: S1 });
     const both = await Promise.all([g.service.ringRelinked(p.messageId), g.service.ringRelinked(p.messageId)]);
     expect(both.filter(Boolean)).toHaveLength(1);
-    const S3 = "30000000-3312-4e8d-8e25-18f525d75bb2"; g.move(S3);
+    const S3 = "30000000-0000-4000-8000-0000000000aa"; g.move(S3);
     await g.store.append("peer_post_relinked", { messageId: p.messageId, recipient: "c-1", recipientSessionId: S3 });
     expect((await g.service.ringRelinked(p.messageId)).state).toBe("sent");
     expect(g.writes.map(([, s]) => s)).toEqual([S1, S3]);

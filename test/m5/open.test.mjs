@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { buildOpenCommand } from "../../src/core/open.mjs";
 
 const base = { root: "/state", binDir: "/opt/upm/bin", claudeBin: "/abs/claude", codexBin: "/abs/codex", environment: { PATH: "/usr/bin" } };
-const claude = (permissionMode) => ({ kind: "claude", sessionId: "10000000-3312-4e8d-8e25-18f525d75bb2", cwd: "/work", permissionMode });
+const claude = (permissionMode) => ({ kind: "claude", sessionId: "10000000-0000-4000-8000-0000000000aa", cwd: "/work", permissionMode });
 
 describe("open builds the one command that keeps a session a peer", () => {
   test("claude: absolute argv[0], explicit resume id and the recorded mode", () => {
     const plan = buildOpenCommand({ ...base, alias: "a-claude", peer: claude("bypass") });
-    expect(plan.argv).toEqual(["/abs/claude", "--resume", "10000000-3312-4e8d-8e25-18f525d75bb2", "--permission-mode", "bypassPermissions"]);
+    expect(plan.argv).toEqual(["/abs/claude", "--resume", "10000000-0000-4000-8000-0000000000aa", "--permission-mode", "bypassPermissions"]);
     expect(plan.cwd).toBe("/work");
     expect(plan.env).toEqual({ UNIVERSAL_PEER_MCP_STATE_DIR: "/state", PATH: "/opt/upm/bin:/usr/bin" });
   });

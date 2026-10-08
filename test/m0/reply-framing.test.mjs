@@ -1,9 +1,9 @@
 // M0 reproduction of 2026-09-29 §1-1 against the code that is running (see running-sut.mjs).
 //
-//   d7e3473e (seq 4688 send, seq 4691 reply 8.3 s later): the reply's first line was prose, the
+//   a5000000 (seq 4688 send, seq 4691 reply 8.3 s later): the reply's first line was prose, the
 //     strict PEER_ACK was on line 2 and reused the request id as its own message_id.
 //     -> peer_frame_uncorrelated(no_reply_marker). Body kept. Sender never saw an ACK.
-//   13457e71 (seq 4692 send, seq 4695 ack 7.5 s later): strict PEER_ACK on line 1, fresh uuid.
+//   a1000000 (seq 4692 send, seq 4695 ack 7.5 s later): strict PEER_ACK on line 1, fresh uuid.
 //     -> peer_ack(application_ack).
 //
 // The design keeps the strict half (no free-text auto-binding, 100% kept). What it changes (M2) is
@@ -22,7 +22,7 @@ describe.skipIf(!RUNNING_AVAILABLE)("running SUT: reply framing", () => {
   beforeEach(async () => { f = await fixture(sut); });
   afterEach(async () => { await f.close(); });
 
-  test("reproduce d7e3473e: prose first, ACK on line 2 -> uncorrelated, body kept, nothing bound", async () => {
+  test("reproduce a5000000: prose first, ACK on line 2 -> uncorrelated, body kept, nothing bound", async () => {
     const body = `수신했습니다. 아래가 확인 줄입니다.\n${strictAck(f.requestId, f.requestId)}`;
     await f.onFrame(frame(body), PEER, { connectionId: 1, frameOrdinal: 2 });
     expect(f.rows("peer_ack")).toHaveLength(0);
@@ -32,7 +32,7 @@ describe.skipIf(!RUNNING_AVAILABLE)("running SUT: reply framing", () => {
     expect(row.bodySha256).toBe(crypto.createHash("sha256").update(body).digest("hex"));
   });
 
-  test("control 13457e71: strict ACK on line 1 with a fresh id -> peer_ack", async () => {
+  test("control a1000000: strict ACK on line 1 with a fresh id -> peer_ack", async () => {
     const own = crypto.randomUUID();
     await f.onFrame(frame(`${strictAck(own, f.requestId)}\n확인`), PEER, {});
     const [row] = f.rows("peer_ack");
