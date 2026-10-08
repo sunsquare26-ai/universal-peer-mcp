@@ -21,6 +21,14 @@ else if (["trace", "stats", "doorbell", "body-dispose", "post", "inbox", "inbox-
   try { process.stdout.write(`${JSON.stringify(await observeCommand(command, process.argv.slice(3)), null, 2)}\n`); }
   catch (error) { process.stderr.write(`${JSON.stringify({ ok: false, code: typeof error?.code === "string" ? error.code : "FAILED", message: String(error?.message ?? error).slice(0, 500), ...(typeof error?.reason === "string" ? { reason: error.reason } : {}) })}\n`); process.exitCode = 1; }
 }
+else if (command === "github") {
+  // M6: GitHub rooms (src/github/cli.mjs, docs/github-transport.md).
+  const { githubCommand } = await import("./github/cli.mjs");
+  try {
+    const result = await githubCommand(process.argv[3], process.argv.slice(4));
+    process.stdout.write(typeof result?.text === "string" ? `${result.text}\n` : `${JSON.stringify(result, null, 2)}\n`);
+  } catch (error) { process.stderr.write(`${JSON.stringify({ ok: false, code: typeof error?.code === "string" ? error.code : "FAILED", message: String(error?.message ?? error).slice(0, 500) })}\n`); process.exitCode = 1; }
+}
 else if (command === "setup") {
   // M5: the one step after installing (src/setup.mjs). Prints the plan; --yes applies it.
   const { applySetup, planSetup, renderSetup } = await import("./setup.mjs");
@@ -57,4 +65,4 @@ else if (command === "open") {
   } catch (error) { process.stderr.write(`${JSON.stringify({ ok: false, code: typeof error?.code === "string" ? error.code : "FAILED", message: String(error?.message ?? error).slice(0, 500) })}\n`); process.exitCode = 1; }
 }
 else if (command === "doctor") { const { doctor } = await import("./doctor.mjs"); process.stdout.write(`${JSON.stringify(await doctor(), null, 2)}\n`); }
-else { process.stderr.write("usage: universal-peer-mcp [serve [--enable milestone] [--enable code-review]|setup [--state dir] [--bin-dir dir] [--yes]|status [--json]|open <alias> [--print]|doctor|trace <id> [--ledger f]|stats [--days n] [--ledger f]|doorbell --thread <uuid> --message-id <uuid> [--alias a]|body-dispose --seq <n> --disposition processed|discard|register --alias <name> [--replace]|unregister --alias <name>|peers|whoami|post --to a[,b] --body-file f|inbox|inbox-ack --message-id <id>]\n"); process.exitCode = 2; }
+else { process.stderr.write("usage: universal-peer-mcp [serve [--enable milestone] [--enable code-review]|github link|remote|status|poll|instructions|setup [--state dir] [--bin-dir dir] [--yes]|status [--json]|open <alias> [--print]|doctor|trace <id> [--ledger f]|stats [--days n] [--ledger f]|doorbell --thread <uuid> --message-id <uuid> [--alias a]|body-dispose --seq <n> --disposition processed|discard|register --alias <name> [--replace]|unregister --alias <name>|peers|whoami|post --to a[,b] --body-file f|inbox|inbox-ack --message-id <id>]\n"); process.exitCode = 2; }

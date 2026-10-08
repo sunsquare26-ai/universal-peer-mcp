@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { dailyStats, pairedResolveRows, traceMessage } from "../../src/core/trace.mjs";
 import { ledger } from "./helpers.mjs";
 
-const M = "13457e71-a5ea-4419-a971-848879e8c5a3";
-const OTHER = "d7e3473e-c0bf-42ba-9fd2-f1aa9c50a216";
+const M = "a1000000-0000-4000-8000-000000000001";
+const OTHER = "a5000000-0000-4000-8000-000000000005";
 const T = (s) => `2026-09-29T06:${s}Z`;
 const send = (id, pid = 31075, session = "aaaaaaaa-0000-4000-8000-000000000001") => ({ messageId: id, targetAlias: "main-claude", alias: "main-claude", targetPid: pid, targetProcStart: "p", targetSessionId: session });
 

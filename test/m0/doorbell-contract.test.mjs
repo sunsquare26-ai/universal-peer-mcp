@@ -13,7 +13,7 @@ import { CodexWake, enqueueCodex, codexWakeTools } from "../../src/extensions/co
 import { checkQueueArgv, doorbell, isDoorbell, FORBIDDEN_QUEUE_FLAGS, DOORBELL_BYTES } from "./contract.mjs";
 import { fakeConnect, queueTarget, writeCli, writeTargets } from "./codex-fixture.mjs";
 
-const ID = "d7e3473e-c0bf-42ba-9fd2-f1aa9c50a216";
+const ID = "a5000000-0000-4000-8000-000000000005";
 const THREAD_UUID = "01a00000-5457-7f82-8602-b992529eac16"; // same as codex-fixture.mjs
 
 describe("contract: the doorbell is fixed, verb-free and carries only a message_id", () => {
@@ -35,7 +35,7 @@ describe("contract: the doorbell is fixed, verb-free and carries only a message_
   });
 
   test("a doorbell cannot be minted for a thread name or a short id", () => {
-    for (const bad of ["codex-main", "d7e3473e", ID.toUpperCase(), `${ID}x`]) expect(() => doorbell(bad)).toThrow();
+    for (const bad of ["codex-main", "a5000000", ID.toUpperCase(), `${ID}x`]) expect(() => doorbell(bad)).toThrow();
   });
 
   test("the only accepted queue argv is queue --thread <uuid> --message <doorbell>", () => {

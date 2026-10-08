@@ -12,16 +12,16 @@ import { redactPublic } from "../src/mcp/redact.mjs";
 import { projectSchema, validateSchema } from "../src/mcp/schema-validator.mjs";
 import { publicResultSchema, toolDefinitions } from "../src/mcp/tools.mjs";
 
-const REPLY_TO = "14e6f292-e7c0-450b-8181-86c256803ec6";
-const THREAD = "9f9f218b-7474-40df-a166-e37d9bcf1a84";
+const REPLY_TO = "a2000000-0000-4000-8000-000000000002";
+const THREAD = "a4000000-0000-4000-8000-000000000004";
 const PEER = { pid: 47687, procStart: "Fri Sep 11 01:14:58 2026" };
 
 // The three first lines a Claude Code session actually wrote on 2026-09-11, verbatim from its own
 // transcript. These are the regression: each was dropped under `no_reply_marker`.
 const REAL_LINES = [
-  `PEER_REPLY thread=9f9f218b replyTo=${REPLY_TO} roundtrip=OK`,
-  `PEER_REPLY thread=9f9f218b re=${REPLY_TO} verdict=delivery-OK-correlation-impossible`,
-  "PEER_ACK thread=9f9f218b review=in-progress board=queued"
+  `PEER_REPLY thread=a4000000 replyTo=${REPLY_TO} roundtrip=OK`,
+  `PEER_REPLY thread=a4000000 re=${REPLY_TO} verdict=delivery-OK-correlation-impossible`,
+  "PEER_ACK thread=a4000000 review=in-progress board=queued"
 ];
 
 describe("parseMarker is unchanged", () => {
@@ -47,7 +47,7 @@ describe("parseMarker is unchanged", () => {
 describe("parseReplyHeader", () => {
   test("accepts a valid reference; an explicitly malformed verdict refuses correlation", () => {
     const first = parseReplyHeader(REAL_LINES[0]);
-    expect(first).toMatchObject({ style: "inband_header", type: "reply", replyTo: "14e6f292e7c0450b818186c256803ec6", threadId: "9f9f218b", verdict: null });
+    expect(first).toMatchObject({ style: "inband_header", type: "reply", replyTo: "a2000000000040008000000000000002", threadId: "a4000000", verdict: null });
     const second = parseReplyHeader(REAL_LINES[1]);
     expect(second).toBeNull();
   });
@@ -59,13 +59,13 @@ describe("parseReplyHeader", () => {
   test("reads every spelling of the reference key and ignores the rest", () => {
     for (const key of ["re", "replyTo", "reply_to", "REPLY-TO"]) {
       expect(parseReplyHeader(`PEER_REPLY ${key}=${REPLY_TO} kind=diagnosis board=queued`).replyTo)
-        .toBe("14e6f292e7c0450b818186c256803ec6");
+        .toBe("a2000000000040008000000000000002");
     }
   });
 
   test("takes a bare eight-hex reference and a dashless uuid alike", () => {
-    expect(parseReplyHeader("PEER_ACK re=14e6f292").replyTo).toBe("14e6f292");
-    expect(parseReplyHeader(`PEER_ACK re=${REPLY_TO.replaceAll("-", "")}`).replyTo).toBe("14e6f292e7c0450b818186c256803ec6");
+    expect(parseReplyHeader("PEER_ACK re=a2000000").replyTo).toBe("a2000000");
+    expect(parseReplyHeader(`PEER_ACK re=${REPLY_TO.replaceAll("-", "")}`).replyTo).toBe("a2000000000040008000000000000002");
   });
 
   test("refuses a reference that is not hex, a short one, a duplicate, and v other than 1", () => {
@@ -82,7 +82,7 @@ describe("parseReplyHeader", () => {
 
   test("reads only the first line and ignores the body under it", () => {
     expect(parseReplyHeader(`PEER_ACK re=${REPLY_TO}\nre=deadbeefdeadbeef\n본문입니다`).replyTo)
-      .toBe("14e6f292e7c0450b818186c256803ec6");
+      .toBe("a2000000000040008000000000000002");
   });
 
   test("refuses a line with no tokens and one with too many", () => {
@@ -146,7 +146,7 @@ describe("the inbound spool and the frame path", () => {
   });
 
   test("an eight-hex reference resolves against the ledger's own row", async () => {
-    await onFrame(envelope(`PEER_ACK re=14e6f292 kind=roundtrip\n본문`), PEER, {});
+    await onFrame(envelope(`PEER_ACK re=a2000000 kind=roundtrip\n본문`), PEER, {});
     expect(rows("peer_ack")[0].messageId).toBe(REPLY_TO);
   });
 
@@ -160,7 +160,7 @@ describe("the inbound spool and the frame path", () => {
   test("an ambiguous reference is refused rather than resolved", async () => {
     const sibling = `${REPLY_TO.slice(0, 8)}-0000-4000-8000-000000000000`;
     await store.reserveRequest({ messageId: sibling, transportMessageId: sibling, threadId: THREAD, replyTo: null, kind: "hello", alias: "main-claude", requestHash: "1".repeat(64), subscriptionId: crypto.randomUUID(), targetAlias: "main-claude", targetPid: PEER.pid, targetProcStart: PEER.procStart, targetProcStartRendering: "utc0-c-squeezed" });
-    await onFrame(envelope("PEER_ACK re=14e6f292\n본문"), PEER, {});
+    await onFrame(envelope("PEER_ACK re=a2000000\n본문"), PEER, {});
     expect(rows("peer_frame_uncorrelated")[0].reason).toBe("ambiguous_reply_reference");
   });
 

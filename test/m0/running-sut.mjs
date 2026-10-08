@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 export const RUNNING_SRC = process.env.UP_RUNNING_SRC ?? fileURLToPath(new URL("../../src", import.meta.url));
 export const RUNNING_AVAILABLE = fs.existsSync(path.join(RUNNING_SRC, "core/inbound-spool.mjs"));
 
-export const THREAD = "9f9f218b-7474-40df-a166-e37d9bcf1a84";
+export const THREAD = "a4000000-0000-4000-8000-000000000004";
 export const PEER = Object.freeze({ pid: 47687, procStart: "Fri Sep 11 01:14:58 2026" });
 
 export async function loadRunning() {

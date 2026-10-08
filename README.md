@@ -333,6 +333,7 @@ The last line deletes your targets and the local event history. Nothing outside 
 
 ## Documentation
 
+- [docs/github-transport.md](docs/github-transport.md) — sessions that cannot reach this Mac (Claude Code cloud, Codex cloud) talk through one private pull request: message line, answers with `re=`, acks, and how each side is woken.
 - [docs/configuration.md](docs/configuration.md) — target schema, environment variables, state layout.
 - [docs/troubleshooting.md](docs/troubleshooting.md) — restarts, extension mismatch, dead targets, permission errors.
 - [docs/known-issues.md](docs/known-issues.md) — what is not closed: refused write-and-close senders, the hold bound, how a refusal reads, and why its reason is on the ledger only. A handoff package ships a separate root-level `KNOWN-ISSUES.md` with the measurements and review residue for that specific handoff; the two are different documents and neither replaces the other.

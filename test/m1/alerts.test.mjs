@@ -37,3 +37,15 @@ test("a bridge that others can write is not run", async () => {
   const r = await new AlertSink({ file: path.join(root, "alerts.jsonl"), command: bridge }).raise({ kind: "backup_failed", key: "backup_failed:2026-09-29" });
   expect(r.bridge).toEqual({ configured: true, ran: false, reason: "command_not_private" });
 });
+
+test("concurrent raises of one key write one line and run the bridge once (review r9)", async () => {
+  const root = await tempRoot(); roots.push(root);
+  const cmd = path.join(root, "cmd"); await fsp.writeFile(cmd, "#!/bin/sh\n", { mode: 0o700 });
+  let runs = 0; const sink = new AlertSink({ file: path.join(root, "alerts.jsonl"), command: cmd, exec: async () => { runs += 1; return { stdout: "" }; } });
+  const results = await Promise.all([1, 2, 3].map(() => sink.raise({ kind: "github_relay_needed", key: "github_relay_needed:egg:abc", code: "codex-cloud" })));
+  expect(results.filter((r) => r.raised)).toHaveLength(3);   // shared result of the one raise
+  expect((await fsp.readFile(path.join(root, "alerts.jsonl"), "utf8")).trim().split("\n")).toHaveLength(1);
+  expect(runs).toBe(1);
+  expect((await sink.raise({ kind: "github_relay_needed", key: "github_relay_needed:egg:abc", code: "codex-cloud" })).duplicate).toBe(true);
+  await expect(sink.raise({ kind: "nope", key: "x:y" })).rejects.toMatchObject({ code: "INVALID_ALERT" });
+});

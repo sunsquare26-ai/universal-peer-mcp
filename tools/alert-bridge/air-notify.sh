@@ -38,6 +38,8 @@ else
   [[ "$code" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || { echo "bad code" >&2; exit 64; }
   id="${key##*:}"
   text="UniversalPeer 경보: ${kind} ${id}"
+  # A message waits in a GitHub room for a remote session nobody can wake: the owner passes it on.
+  [ "$kind" = "github_relay_needed" ] && text="UniversalPeer: ${code} 에게 GitHub 방 메시지 전달 필요"
 fi
 [ -z "$air" ] || [[ "$air" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$ ]] || { echo "bad UNIVERSAL_PEER_AIR_SSH" >&2; exit 64; }
 

@@ -23,9 +23,9 @@ On 2026-09-11 that session wrote a first line on every reply and none of them pa
 wrote were, verbatim:
 
 ```
-PEER_REPLY thread=9f9f218b replyTo=14e6f292-e7c0-450b-8181-86c256803ec6 roundtrip=OK
-PEER_REPLY thread=9f9f218b re=14e6f292-e7c0-450b-8181-86c256803ec6 verdict=delivery-OK-correlation-impossible
-PEER_ACK thread=9f9f218b review=in-progress board=queued
+PEER_REPLY thread=a4000000 replyTo=a2000000-0000-4000-8000-000000000002 roundtrip=OK
+PEER_REPLY thread=a4000000 re=a2000000-0000-4000-8000-000000000002 verdict=delivery-OK-correlation-impossible
+PEER_ACK thread=a4000000 review=in-progress board=queued
 ```
 
 Against the strict grammar each is missing `v=1` and `message_id=`, spells `thread_id` as `thread`
@@ -103,7 +103,7 @@ row already, and the text is carried beside the name (`src/core/inbound-hydrate.
 
 ```
 "bodyFile":"inbound/20260911T100745159Z-90bd…​.txt","bodyBytes":4047,"bodySha256":"…",
-"body":"PEER_REPLY re=34acbf18… verdict=pass\n\n**본문…**","bodyInlineBytes":4047
+"body":"PEER_REPLY re=a3000000… verdict=pass\n\n**본문…**","bodyInlineBytes":4047
 ```
 
 | field | meaning |

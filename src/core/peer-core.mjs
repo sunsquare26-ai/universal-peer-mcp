@@ -272,7 +272,7 @@ export class PeerCore extends EventEmitter {
     }
     const request = resolved.request;
     this.#assertPeer(request, peer);
-    // A response that names the request's own id as its id is not an answer to it (d7e3473e,
+    // A response that names the request's own id as its id is not an answer to it (a5000000,
     // 2026-09-29): it is a copied line, and binding it would let any echo of a request ACK itself.
     // Checked after the writer is proven to be the target, so a wrong writer is still refused first.
     if (selfReferencing(marker)) return uncorrelated("self_referencing_response", { ...await this.#spool(content), ...who });

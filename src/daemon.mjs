@@ -33,6 +33,9 @@ import { loadSettings, settingsStatus } from "./core/settings.mjs";
 import { DoorbellService } from "./core/doorbell-service.mjs";
 import { ReceiptService } from "./core/receipts.mjs";
 import { overview } from "./core/overview.mjs";
+import { GithubBridge } from "./github/bridge.mjs";
+import { createGithubClient } from "./github/client.mjs";
+import { loadRoomsSync, remoteOf } from "./github/rooms.mjs";
 import { createSenderResolver } from "./core/sender-auth.mjs";
 import { uuidv5 } from "./core/posts.mjs";
 import { acceptPost, ackInbox, bodyDigest, heldPosts, inbox, linkUnmatched, postBindings, recipientMessageId, relinkPost, sessionLineage } from "./core/posts.mjs";
@@ -206,7 +209,32 @@ const doorbell = new DoorbellService({ store, root: paths.root, settings, codexP
 // M5 F0: a stuck message is reported to its sender, in the sender's own inbox (src/core/receipts.mjs).
 const receipts = new ReceiptService({ store, spool: inboundSpool });
 await receipts.enable();
-store.onAppend = async (row) => { await doorbell.onAppend(row); await receipts.onAppend(row); };
+// M6: the GitHub bridge (src/github/bridge.mjs). Rooms come from <state>/github-rooms.json, read
+// fresh each time; nothing is polled until the owner links a room.
+let githubRooms = { rooms: {}, remotes: {} };
+const readGithubRooms = () => { try { githubRooms = loadRoomsSync(paths.root); } catch (error) { alerts.raise({ kind: "github_rooms_invalid", key: `github_rooms_invalid:${new Date().toISOString().slice(0, 13)}`, code: typeof error?.code === "string" ? error.code : "INVALID_ROOMS" }).catch(() => {}); } return githubRooms; };
+readGithubRooms();
+const githubPeer = (alias) => { const r = remoteOf(readGithubRooms(), alias); return r ? { alias, kind: "github", room: r.room, instance: r.instance, epoch: r.epoch } : null; };
+const github = new GithubBridge({ store, spool: inboundSpool, client: createGithubClient(), rooms: readGithubRooms,
+  localRecipient: (alias) => { const peer = resolvePeer(alias, { claude: targets, codex: codexPeers }); return peer ? recipientFieldsOf(peer) : null; },
+  isLocalAlias: (alias) => resolvePeer(alias, { claude: targets, codex: codexPeers }) !== null,
+  readBody: async (post) => fsp.readFile(path.join(paths.root, post.bodyFile), "utf8"),
+  // A remote with wake "relay": the owner is told a message waits there (alias as the code, no body).
+  relayNeeded: ({ room, alias, messageId }) => alerts.raise({ kind: "github_relay_needed", key: `github_relay_needed:${room}:${messageId.toLowerCase()}`, code: alias }) });
+// Each hook on its own: one failing never skips the others; a failure is alerted once an hour.
+const hook = (name, run) => async (row) => { try { await run(row); } catch (error) { alerts.raise({ kind: "append_hook_failed", key: `append_hook_failed:${name}:${new Date().toISOString().slice(0, 13)}`, code: typeof error?.code === "string" ? error.code : "HOOK_FAILED" }).catch(() => {}); } };
+const hooks = [hook("doorbell", (row) => doorbell.onAppend(row)), hook("receipts", (row) => receipts.onAppend(row)), hook("github", (row) => github.onAppend(row))];
+store.onAppend = async (row) => { for (const h of hooks) await h(row); };
+setImmediate(() => { github.sweep().catch(() => {}); });
+const pollGithub = async () => {
+  const report = {};
+  for (const room of Object.keys(readGithubRooms().rooms)) {
+    try { report[room] = await github.poll(room); await github.sweep(); }
+    catch (error) { report[room] = { error: typeof error?.code === "string" ? error.code : "POLL_FAILED" }; alerts.raise({ kind: "github_poll_failed", key: `github_poll_failed:${room}:${new Date().toISOString().slice(0, 13)}`, code: report[room].error }).catch(() => {}); }
+  }
+  return report;
+};
+setInterval(() => { pollGithub().catch(() => {}); }, 30 * 1000).unref();
 // A sweep that fails is retried on the next minute; a failure that persists (disk, permissions) is
 // reported once an hour rather than letting the feature go quiet.
 const sweepReceipts = () => { receipts.sweep().catch((error) => { const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "RECEIPT_SWEEP_FAILED"; alerts.raise({ kind: "receipt_sweep_failed", key: `receipt_sweep_failed:${new Date().toISOString().slice(0, 13)}`, code }).catch(() => {}); }); };
@@ -328,6 +356,8 @@ async function dispatch(method, args, caller = null) {
   if (method === "peer_unregister") return unregister(args, caller);
   if (method === "peer_directory") return directory();
   if (method === "peer_overview") return peerOverview();
+  if (method === "github_poll") return pollGithub();
+  if (method === "github_status") return githubStatus();
   if (method === "peer_post_relink") return relink(args, caller);
   if (method === "peer_whoami") { const who = await identifyCaller(caller); return who.authenticated ? { authenticated: true, alias: who.alias, kind: who.kind } : { authenticated: false, kind: who.kind ?? null, reason: who.reason, ...(who.rebind ? { rebind: who.rebind } : {}) }; }
   if (method === "peer_link_unmatched") { const op = await requireOperator(caller, args, "link", String(args.sourceSeq)); return linkUnmatched(store, { sourceSeq: args.sourceSeq, messageId: args.messageId, as: args.as, verdict: args.verdict ?? null, by: { linkedByPid: caller?.pid, operator: OPERATOR_LABEL, operatorTty: op.tty } }); }
@@ -393,13 +423,14 @@ async function post(args, caller) {
   // M4 deterministic routing: every name resolves to exactly one registered session before anything
   // is written; an unknown name refuses the whole send (nothing half-sent to a group).
   const recipients = [...new Set(args.to)];
-  const resolved = recipients.map((alias) => [alias, resolvePeer(alias, { claude: targets, codex: codexPeers })]);
+  // M6: an alias no local session holds may be a remote endpoint of a linked GitHub room.
+  const resolved = recipients.map((alias) => [alias, resolvePeer(alias, { claude: targets, codex: codexPeers }) ?? githubPeer(alias)]);
   const unknown = resolved.filter(([, peer]) => peer === null).map(([alias]) => alias);
   if (unknown.length) { await store.append("peer_post_refused", { reason: "unknown_recipient", unknownCount: unknown.length, ...bodyDigest(args.body), ...who }); throw Object.assign(new Error(`not a registered peer: ${unknown.join(", ")} (see: universal-peer-mcp peers)`), { code: "UNKNOWN_RECIPIENT" }); }
   const groupId = args.groupId ?? crypto.randomUUID();
   const results = []; const deliveredTo = new Map();
   for (const [recipient, peer] of resolved) {
-    const key = identityKey(peer);
+    const key = peer.kind === "github" ? `github:${peer.room}:${peer.alias}` : identityKey(peer);
     // Two names for one session get one message (design §3-3).
     if (deliveredTo.has(key)) { results.push({ recipient, state: "same_session", deliveredAs: deliveredTo.get(key) }); continue; }
     deliveredTo.set(key, recipient);
@@ -420,7 +451,8 @@ async function replyPost(args, auth, who) {
   const readable = original.recipient === auth.alias && lineageOf(auth).has(postBindings(store.events).get(replyTo) ?? "");
   if (!readable) { await store.append("peer_post_refused", { reason: "reply_not_allowed", replyTo, ...bodyDigest(args.body), ...who }); throw Object.assign(new Error("only the session the original was for may answer it"), { code: "REPLY_NOT_ALLOWED" }); }
   const to = typeof original.senderAlias === "string" ? original.senderAlias : null;
-  const binding = original.senderKind === "codex" ? (typeof original.senderThreadId === "string" ? { recipientKind: "codex", recipientThreadId: original.senderThreadId } : null) : (typeof original.senderSessionId === "string" ? { recipientKind: "claude", recipientSessionId: original.senderSessionId } : null);
+  const binding = original.senderKind === "github" ? (typeof original.githubRoom === "string" ? { recipientKind: "github", githubRoom: original.githubRoom, githubInstance: original.githubInstance, githubEpoch: original.githubEpoch } : null)
+    : original.senderKind === "codex" ? (typeof original.senderThreadId === "string" ? { recipientKind: "codex", recipientThreadId: original.senderThreadId } : null) : (typeof original.senderSessionId === "string" ? { recipientKind: "claude", recipientSessionId: original.senderSessionId } : null);
   if (!to || !binding) throw Object.assign(new Error("the original has no authenticated sender to answer"), { code: "REPLY_NOT_ALLOWED" });
   if (Array.isArray(args.to) && (args.to.length !== 1 || args.to[0] !== to)) throw Object.assign(new Error(`an answer goes to the original's sender (${to})`), { code: "INVALID_CONTROL_ARGUMENTS" });
   // M5: an answer's id is derived from (the original, the answering session, the bytes) unless the
@@ -571,6 +603,9 @@ async function ackOwnInbox(args, caller) {
 async function register(args, caller) {
   const allowed = new Set(["alias", "replace"]);
   if (!args || typeof args !== "object" || Object.keys(args).some((k) => !allowed.has(k)) || typeof args.alias !== "string") throw Object.assign(new Error("peer_register takes alias and optional replace"), { code: "INVALID_CONTROL_ARGUMENTS" });
+  // M6: a remote endpoint's name is not available to a local session (it would let either side speak
+  // as the other). The owner removes or renames the remote first.
+  if (remoteOf(readGithubRooms(), args.alias)) throw Object.assign(new Error(`${args.alias} is a GitHub room endpoint; choose another alias`), { code: "ALIAS_TAKEN" });
   const who = await identifyCaller(caller);
   let identity = null;
   if (who.kind === "claude" && (who.authenticated || who.reason === "session_not_allowlisted")) {
@@ -607,6 +642,7 @@ async function unregister(args, caller) {
 
 function recipientFieldsOf(peer) {
   if (!peer) return {};
+  if (peer.kind === "github") return { recipientKind: "github", githubRoom: peer.room, githubInstance: peer.instance, githubEpoch: peer.epoch };
   return { recipientKind: peer.kind, ...(peer.kind === "claude" ? { recipientSessionId: peer.sessionId } : { recipientThreadId: peer.threadId }) };
 }
 function lineageOf(who) { return sessionLineage(store.events, who.alias, who.kind === "claude" ? { kind: "claude", sessionId: who.sessionId } : { kind: "codex", threadId: who.threadId }); }
@@ -647,7 +683,9 @@ function directory() {
 }
 // M5 F3: one screen of who is there and what waits on whom (src/core/overview.mjs). Metadata only.
 async function peerOverview() {
-  const dir = directory(); const { peers } = dir;
+  const dir = directory();
+  // M6: remote endpoints of linked GitHub rooms are listed with the local sessions (presence unknown).
+  const peers = [...dir.peers, ...Object.entries(readGithubRooms().remotes).map(([alias, e]) => ({ alias, kind: "github", room: e.room }))];
   const started = store.events.find((e) => e.type === "daemon_started" && e.generationId === generationId);
   const presence = new Map(); const presenceReason = new Map();
   for (const p of peers) if (p.kind === "claude") { const r = await claudePresence(p.alias, p.sessionId); presence.set(p.alias, r.state); if (r.reason) presenceReason.set(p.alias, r.reason); }
@@ -657,6 +695,17 @@ async function peerOverview() {
   return overview({ events: store.events, peers, presence, presenceReason, eligible: (post) => doorbell.eligibleAgain(post, index), heldIds,
     held: new Map(peers.filter((p) => p.heldForPreviousSession).map((p) => [p.alias, p.heldForPreviousSession])),
     daemon: { pid: process.pid, buildId: BUILD_ID, startedAt: started?.at ?? null, previousEnd: started?.previousEnd ?? null } });
+}
+// M6: what the GitHub bridge holds — rooms, remotes, and per room the last poll and counts. No body.
+function githubStatus() {
+  const table = readGithubRooms(); const rooms = {};
+  for (const name of Object.keys(table.rooms)) {
+    const seen = store.events.filter((e) => e.type === "github_comment_seen" && e.room === name);
+    const count = (type, extra = () => true) => store.events.filter((e) => e.type === type && e.room === name && extra(e)).length;
+    rooms[name] = { ...table.rooms[name], commentsSeen: seen.length, lastSeenAt: seen.at(-1)?.at ?? null, quarantined: count("github_message_quarantined"), observed: count("github_comment_observed"),
+      sent: store.events.filter((e) => e.type === "github_outbound_posted" && e.room === name).length, received: store.events.filter((e) => e.type === "peer_post" && e.source === "github" && e.githubRoom === name).length };
+  }
+  return { rooms, remotes: table.remotes };
 }
 // The Owner re-addresses one held post to the alias's current session. A registered session may not
 // do this for itself: that would be the takeover this rule exists to stop.
