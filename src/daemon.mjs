@@ -35,7 +35,7 @@ import { ReceiptService } from "./core/receipts.mjs";
 import { overview } from "./core/overview.mjs";
 import { createSenderResolver } from "./core/sender-auth.mjs";
 import { uuidv5 } from "./core/posts.mjs";
-import { acceptPost, ackInbox, bodyDigest, heldPosts, inbox, linkUnmatched, postBindings, recipientMessageId, relinkPost, sessionLineage } from "./core/posts.mjs";
+import { acceptPost, ackInbox, bindingKey, bodyDigest, heldPosts, inbox, linkUnmatched, postBindings, recipientMessageId, relinkPost, sessionLineage } from "./core/posts.mjs";
 import { LEGACY_BODIES, LEGACY_BODIES_WARNING } from "./core/settings.mjs";
 import { createCodexResolver } from "./core/codex-identity.mjs";
 import { sweepOrphanBodies } from "./core/orphans.mjs";
@@ -423,7 +423,10 @@ async function replyPost(args, auth, who) {
     // Every refusal of 2026-10-12..18 (seq 47903 … 80843, 8 of 8) was a session answering its own
     // post to add to it; most then sent the same text again as a new post, one retried the refused
     // reply first. The way out is named for that case only — the recipient is one the sender chose.
-    const own = original.senderAlias === auth.alias && typeof original.recipient === "string" && original.recipient !== "*";
+    // Own means this session (or one it proved it resumed) sent it — not merely the same alias, which
+    // another session may hold now (Codex review of 62fde67).
+    const senderKey = original.senderKind === "codex" ? bindingKey("codex", original.senderThreadId) : (original.senderKind === undefined || original.senderKind === "claude") ? bindingKey("claude", original.senderSessionId) : null;
+    const own = original.senderAlias === auth.alias && senderKey !== null && lineageOf(auth).has(senderKey) && typeof original.recipient === "string" && original.recipient !== "*";
     throw Object.assign(new Error(own
       ? `이 메시지는 이 세션이 보낸 것이라 --reply-to 로 답할 수 없습니다. 같은 상대에게 이어서 보내려면: universal-peer-mcp post --to ${original.recipient} --body-file <파일>`
       : "only the session the original was for may answer it"), { code: "REPLY_NOT_ALLOWED" });
