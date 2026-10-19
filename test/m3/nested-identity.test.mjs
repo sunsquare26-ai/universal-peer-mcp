@@ -19,6 +19,6 @@ test("a Codex thread started under a Claude session is the Codex thread, not the
   const x = await L.codex();
   const r = await x.run(["register", "--alias", "test-codex-1"]);
   expect(r.json).toMatchObject({ state: "registered", alias: "test-codex-1", kind: "codex", threadId: x.threadId });
-  expect((await x.run(["whoami"])).json).toEqual({ authenticated: true, alias: "test-codex-1", kind: "codex" });
+  expect((await x.run(["whoami"])).json).toEqual({ authenticated: true, alias: "test-codex-1", kind: "codex", reopen: "universal-peer-mcp open test-codex-1" });
   await fsp.rm(path.join(L.sessions, `${process.pid}.json`), { force: true });
 });

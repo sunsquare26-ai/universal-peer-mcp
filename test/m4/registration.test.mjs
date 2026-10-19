@@ -16,10 +16,13 @@ test("a Claude double and a Codex double register themselves; peers lists them; 
   expect(ra.json).toMatchObject({ state: "registered", alias: "test-claude-1", kind: "claude", sessionId: a.sessionId, permissionMode: "bypass" });
   const rx = await x.run(["register", "--alias", "test-codex-1"]);
   expect(rx.json).toMatchObject({ state: "registered", alias: "test-codex-1", kind: "codex", threadId: x.threadId });
-  expect((await a.run(["whoami"])).json).toEqual({ authenticated: true, alias: "test-claude-1", kind: "claude" });
-  expect((await x.run(["whoami"])).json).toEqual({ authenticated: true, alias: "test-codex-1", kind: "codex" });
+  expect((await a.run(["whoami"])).json).toEqual({ authenticated: true, alias: "test-claude-1", kind: "claude", reopen: "universal-peer-mcp open test-claude-1" });
+  expect((await x.run(["whoami"])).json).toEqual({ authenticated: true, alias: "test-codex-1", kind: "codex", reopen: "universal-peer-mcp open test-codex-1" });
   const listed = (await L.owner(["peers"])).json.peers;
   expect(listed.map((p) => [p.alias, p.kind])).toEqual([["test-claude-1", "claude"], ["test-codex-1", "codex"]]);
+  // The line a session hands out when asked for a restart command (measured 2026-10-12, seq 47164-47751).
+  expect(listed.map((p) => p.reopen)).toEqual(["universal-peer-mcp open test-claude-1", "universal-peer-mcp open test-codex-1"]);
+  expect((await L.owner(["peers"])).json.reopenAll).toBe("universal-peer-mcp restore");
   const targets = JSON.parse(await fsp.readFile(L.paths.targets, "utf8"));
   expect(Object.keys(targets["test-claude-1"]).sort()).toEqual(["cwd", "permissionMode", "sessionId"]);
   expect((await fsp.stat(L.paths.targets)).mode & 0o777).toBe(0o600);
@@ -64,8 +67,23 @@ test("named refusals: Codex thread without a rollout file, Claude session withou
   const plain = await L.claude({ mode: null });
   const r = await plain.run(["register", "--alias", "test-plain"]);
   expect(r.error).toMatchObject({ code: "SESSION_UNPROVEN" }); expect(r.error.message).toContain("--permission-mode");
+  expect(r.error.message).not.toContain("universal-peer-mcp open");
   const reasons = (await L.events()).filter((e) => e.type === "peer_register_refused").map((e) => e.reason);
   expect(reasons).toEqual(["codex_thread_unregistered", "permission_mode_unproven"]);
+});
+
+test("a registered session restarted without --permission-mode is told the one line that reopens it (seq 47214)", async () => {
+  const L = await open();
+  const a = await L.claude(); await a.run(["register", "--alias", "test-crash"]); await a.close();
+  // The same conversation resumed by hand after a crash: same session id, no mode in argv.
+  const resumed = await L.claude({ sessionId: a.sessionId, mode: null });
+  const r = await resumed.run(["register", "--alias", "test-crash"]);
+  expect(r.error).toMatchObject({ code: "SESSION_UNPROVEN", reason: "permission_mode_unproven" });
+  expect(r.error.message).toContain("universal-peer-mcp open test-crash");
+  // Another session asking for that alias is not pointed at a line that would open someone else's conversation.
+  const other = await L.claude({ mode: null });
+  const o = await other.run(["register", "--alias", "test-crash"]);
+  expect(o.error.message).not.toContain("universal-peer-mcp open"); expect(o.error.message).toContain("--permission-mode");
 });
 
 // Nested sessions: the nearer host is the caller. Codex started inside a Claude session's tree is the
