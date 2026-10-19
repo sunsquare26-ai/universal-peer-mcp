@@ -64,6 +64,14 @@ describe("open starts the Codex app server it resumes on, when nothing answers t
     expect(code).toBe(1);
     expect(launched).toEqual([["/abs/codex", "app-server", "daemon", "start"]]);
   });
+  test("a start that never exits is bounded by the same deadline, and an answer before it exits is enough", async () => {
+    const never = () => ({ exited: new Promise(() => {}) });
+    const began = Date.now();
+    const result = await ensureCodexAppServer(plan().appServer, { ...quiet, waitMs: 50, answers: async () => false, spawn: never });
+    expect(result).toContain("still running"); expect(Date.now() - began).toBeLessThan(2000);
+    let calls = 0;
+    expect(await ensureCodexAppServer(plan().appServer, { ...quiet, answers: async () => (calls += 1) > 2, spawn: never })).toBeNull();
+  });
   test("socketAnswers: a dangling link is not an app server, a listening socket is", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "upm-open-"));
     try {

@@ -132,11 +132,15 @@ export function socketAnswers(socket, { timeoutMs = 1000 } = {}) {
 export async function ensureCodexAppServer(appServer, { spawn = Bun.spawn, answers = socketAnswers, waitMs = 15_000, stepMs = 250, log = (line) => process.stderr.write(line) } = {}) {
   if (await answers(appServer.socket)) return null;
   log(`universal-peer: the Codex app server is not running; starting it: ${appServer.start.join(" ")}\n`);
-  let code;
-  try { code = await spawn(appServer.start, { stdin: "ignore", stdout: "ignore", stderr: "inherit" }).exited; }
+  // One deadline from the start on: a start that never exits must not hold open past it (Codex review
+  // of faa5c11), and a socket that answers before it exits is enough.
+  const deadline = Date.now() + waitMs;
+  let code = null;
+  try { spawn(appServer.start, { stdin: "ignore", stdout: "ignore", stderr: "inherit" }).exited.then((c) => { code = c; }, () => {}); }
   catch (error) { return `could not run ${appServer.start[0]}: ${error?.code ?? error?.message ?? "spawn failed"}`; }
-  for (const deadline = Date.now() + waitMs; Date.now() < deadline; await new Promise((resolve) => setTimeout(resolve, stepMs))) if (await answers(appServer.socket)) return null;
-  return `the Codex app server did not come up at ${appServer.socket} (start exited ${code})`;
+  do { if (await answers(appServer.socket)) return null; await new Promise((resolve) => setTimeout(resolve, stepMs)); } while (Date.now() < deadline);
+  if (await answers(appServer.socket)) return null;
+  return `the Codex app server did not come up at ${appServer.socket} (start ${code === null ? "still running" : `exited ${code}`})`;
 }
 
 // Runs the planned command in this terminal and returns its exit code. stdio is inherited: the
