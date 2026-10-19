@@ -96,5 +96,8 @@ export function renderOverview(view, now = Date.now()) {
     for (const id of (u.ids ?? []).slice(0, 5)) notes.push(`    universal-peer-mcp link --post ${id}`);
   }
   if (notes.length) lines.push("", "손볼 것:", ...notes);
+  // Said every time, because "make me the command to restart it" is asked of a session right after a
+  // crash, and status is what that session reads first (measured 2026-10-12, seq 47164-47751).
+  if (view.peers.some((p) => p.kind !== "github")) lines.push("", "다시 열기(재시작·크래시 뒤): 그 세션을 닫고 터미널에서 universal-peer-mcp open <별칭> 한 줄. 폴더와 대화가 이어지고 Claude 는 등록된 권한 모드로 열립니다. 경로·환경변수를 붙이거나 따로 실행 스크립트를 만들 필요가 없습니다. 꺼진 세션을 한꺼번에: universal-peer-mcp restore");
   return `${lines.join("\n")}\n`;
 }

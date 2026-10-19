@@ -35,7 +35,7 @@ import { ReceiptService } from "./core/receipts.mjs";
 import { overview } from "./core/overview.mjs";
 import { createSenderResolver } from "./core/sender-auth.mjs";
 import { uuidv5 } from "./core/posts.mjs";
-import { acceptPost, ackInbox, bodyDigest, heldPosts, inbox, linkUnmatched, postBindings, recipientMessageId, relinkPost, sessionLineage } from "./core/posts.mjs";
+import { acceptPost, ackInbox, bindingKey, bodyDigest, heldPosts, inbox, linkUnmatched, postBindings, recipientMessageId, relinkPost, sessionLineage } from "./core/posts.mjs";
 import { LEGACY_BODIES, LEGACY_BODIES_WARNING } from "./core/settings.mjs";
 import { createCodexResolver } from "./core/codex-identity.mjs";
 import { sweepOrphanBodies } from "./core/orphans.mjs";
@@ -418,7 +418,19 @@ async function replyPost(args, auth, who) {
   const original = store.events.find((e) => e.type === "peer_post" && e.messageId === replyTo);
   if (!original) throw Object.assign(new Error("no accepted post with that id"), { code: "POST_UNKNOWN" });
   const readable = original.recipient === auth.alias && lineageOf(auth).has(postBindings(store.events).get(replyTo) ?? "");
-  if (!readable) { await store.append("peer_post_refused", { reason: "reply_not_allowed", replyTo, ...bodyDigest(args.body), ...who }); throw Object.assign(new Error("only the session the original was for may answer it"), { code: "REPLY_NOT_ALLOWED" }); }
+  if (!readable) {
+    await store.append("peer_post_refused", { reason: "reply_not_allowed", replyTo, ...bodyDigest(args.body), ...who });
+    // Every refusal of 2026-10-12..18 (seq 47903 … 80843, 8 of 8) was a session answering its own
+    // post to add to it; most then sent the same text again as a new post, one retried the refused
+    // reply first. The way out is named for that case only — the recipient is one the sender chose.
+    // Own means this session (or one it proved it resumed) sent it — not merely the same alias, which
+    // another session may hold now (Codex review of 62fde67).
+    const senderKey = original.senderKind === "codex" ? bindingKey("codex", original.senderThreadId) : (original.senderKind === undefined || original.senderKind === "claude") ? bindingKey("claude", original.senderSessionId) : null;
+    const own = original.senderAlias === auth.alias && senderKey !== null && lineageOf(auth).has(senderKey) && typeof original.recipient === "string" && original.recipient !== "*";
+    throw Object.assign(new Error(own
+      ? `이 메시지는 이 세션이 보낸 것이라 --reply-to 로 답할 수 없습니다. 같은 상대에게 이어서 보내려면: universal-peer-mcp post --to ${original.recipient} --body-file <파일>`
+      : "only the session the original was for may answer it"), { code: "REPLY_NOT_ALLOWED" });
+  }
   const to = typeof original.senderAlias === "string" ? original.senderAlias : null;
   const binding = original.senderKind === "codex" ? (typeof original.senderThreadId === "string" ? { recipientKind: "codex", recipientThreadId: original.senderThreadId } : null) : (typeof original.senderSessionId === "string" ? { recipientKind: "claude", recipientSessionId: original.senderSessionId } : null);
   if (!to || !binding) throw Object.assign(new Error("the original has no authenticated sender to answer"), { code: "REPLY_NOT_ALLOWED" });
@@ -578,7 +590,16 @@ async function register(args, caller) {
     let cwd; try { cwd = await fsp.realpath(who.cwd); } catch { return refused("claude_cwd_missing"); }
     let permissionMode = null;
     for (const mode of ["bypass", "prompting"]) { try { provePermissionMode(mode, who.pid, who.procStart); permissionMode = mode; break; } catch {} }
-    if (!permissionMode) return refused("permission_mode_unproven", "the Claude session must be started with an explicit --permission-mode (for example: --permission-mode bypassPermissions) by absolute path");
+    // The refusal names the line that fixes it (measured 2026-10-12 seq 47214: a session restarted
+    // after a crash without the flag was refused, and the owner then asked it for a restart command).
+    // `open` is offered only when the alias already names this very session, so it reopens this
+    // conversation and nothing else; any other case gets the general form, with no mode chosen for it.
+    if (!permissionMode) {
+      const same = typeof targets[args.alias]?.sessionId === "string" && targets[args.alias].sessionId.toLowerCase() === String(who.sessionId).toLowerCase();
+      return refused("permission_mode_unproven", same
+        ? `이 Claude 세션은 권한 모드를 증명할 수 없게 열려 있습니다(--permission-mode 없이, 또는 PATH 의 claude 로 시작). /exit 한 뒤 터미널에서 한 줄: universal-peer-mcp open ${args.alias} — 이 대화가 등록된 권한 모드로 다시 열리고 등록도 그대로입니다.`
+        : "이 Claude 세션은 절대경로와 --permission-mode 를 붙여 시작해야 등록됩니다. /exit 한 뒤 예: ~/.local/bin/claude --resume <이 세션 id> --permission-mode default (또는 bypassPermissions) 로 다시 열고 register 를 다시 실행하세요.");
+    }
     identity = { kind: "claude", sessionId: who.sessionId, cwd, permissionMode };
   } else if (who.kind === "codex" && (who.authenticated || who.reason === "session_not_allowlisted")) {
     identity = { kind: "codex", threadId: who.threadId };

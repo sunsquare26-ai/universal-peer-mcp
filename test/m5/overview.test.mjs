@@ -57,3 +57,11 @@ test("a misopened session gets one note, not a second one promising a ring on an
   expect(text).toContain("자동으로 한 번 더 갑니다");
   expect(text).not.toContain("이 세션이 다시 무엇이든 실행하면");
 });
+
+test("status always says how to reopen a session, without paths or a hand-made script (measured 2026-10-12, seq 47164-47751)", () => {
+  const text = renderOverview(overview({ events, peers, now: NOW }), NOW);
+  expect(text).toContain("universal-peer-mcp open <별칭>");
+  expect(text).toContain("universal-peer-mcp restore");
+  expect(text).not.toContain("UNIVERSAL_PEER_MCP_STATE_DIR=");
+  expect(renderOverview(overview({ events: [], peers: [], now: NOW }), NOW)).not.toContain("다시 열기");
+});

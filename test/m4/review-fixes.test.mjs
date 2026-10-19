@@ -246,3 +246,22 @@ test("operator(interactive-tty): the phrase typed at a terminal outside any sess
   expect(actions.every((e) => /^tty/.test(e.tty))).toBe(true);
   void c1; void m;
 }, 60_000);
+
+test("answering one's own post is refused with the line that sends it as a new post (seq 47903…80843, 8 of 8)", async () => {
+  const { L, c1, x1 } = await setup();
+  const mine = await post(L, x1, "test-claude-1", "FIRST");
+  const own = await x1.run(["post", "--reply-to", mine, "--body-file", await writeBody(L, "MORE")]);
+  expect(own.error).toMatchObject({ code: "REPLY_NOT_ALLOWED" });
+  expect(own.error.message).toContain("universal-peer-mcp post --to test-claude-1 --body-file");
+  // A third party is not told who the original was for.
+  const x2 = await L.codex(); await x2.run(["register", "--alias", "test-codex-2"]);
+  const third = await x2.run(["post", "--reply-to", mine, "--body-file", await writeBody(L, "NOSY")]);
+  expect(third.error).toMatchObject({ code: "REPLY_NOT_ALLOWED" }); expect(third.error.message).not.toContain("test-claude-1");
+  // Nor is a different thread that took the same alias over (Codex review of 62fde67).
+  const x3 = await L.codex(); const took = await x3.run(["register", "--alias", "test-codex-1", "--replace"]);
+  expect(took.json).toMatchObject({ state: "registered", alias: "test-codex-1" });
+  const heir = await x3.run(["post", "--reply-to", mine, "--body-file", await writeBody(L, "HEIR")]);
+  expect(heir.error).toMatchObject({ code: "REPLY_NOT_ALLOWED" }); expect(heir.error.message).not.toContain("test-claude-1");
+  expect((await L.events()).filter((e) => e.type === "peer_post_refused").map((e) => e.reason)).toEqual(["reply_not_allowed", "reply_not_allowed", "reply_not_allowed"]);
+  void c1;
+}, 60_000);

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { assertPrivateFile, STATE_DIR_ENV, statePaths } from "./state-paths.mjs";
@@ -69,7 +70,7 @@ export function codexThreadCwd(threadId, { codexHome = defaultCodexHome() } = {}
 
 // Pure: alias row in, the exact command out. Everything it decides is visible in the result, so
 // `open --print` shows the owner what would run before anything does.
-export function buildOpenCommand({ alias, peer, root, binDir, claudeBin, codexBin, cwd, permissionFlag = null, environment = process.env }) {
+export function buildOpenCommand({ alias, peer, root, binDir, claudeBin, codexBin, cwd, permissionFlag = null, environment = process.env, codexHome = defaultCodexHome(environment) }) {
   const env = { [STATE_DIR_ENV]: root, PATH: [binDir, environment.PATH].filter(Boolean).join(":") };
   if (peer.kind === "claude") {
     const recorded = peer.permissionMode;
@@ -87,7 +88,12 @@ export function buildOpenCommand({ alias, peer, root, binDir, claudeBin, codexBi
   if (peer.kind === "codex") {
     if (!codexBin) throw coded("OPEN_CODEX_NOT_FOUND", "no absolute codex executable found; pass --codex <absolute path>");
     if (!cwd) throw coded("OPEN_CWD_UNKNOWN", `the working directory of ${alias}'s thread is not recorded; pass --cwd <absolute path>`);
-    return { alias, kind: "codex", cwd, argv: [codexBin, "--remote", "unix://", "--no-alt-screen", "-C", cwd, "resume", peer.threadId], env };
+    // `unix://` is the app-server's default control socket. After a reboot it is gone (it links into
+    // /private/tmp) and codex exits with "failed to connect to remote app server" — seen 2026-10-18,
+    // when the owner then had to ask for the command again. So the local app server is started first
+    // when nothing answers there; `daemon start` is codex's own "start if not running", local only.
+    const appServer = { socket: codexAppServerSocket(codexHome), start: [codexBin, "app-server", "daemon", "start"] };
+    return { alias, kind: "codex", cwd, argv: [codexBin, "--remote", "unix://", "--no-alt-screen", "-C", cwd, "resume", peer.threadId], env, appServer };
   }
   throw coded("OPEN_KIND_UNKNOWN", `alias ${alias} has no kind this can reopen`);
 }
@@ -106,12 +112,46 @@ export async function planOpen(alias, { root = statePaths().root, binDir, claude
   const claudeBin = firstExecutable([claude, environment.UNIVERSAL_PEER_CLAUDE_BIN, path.join(home, ".local", "bin", "claude"), ...onPath("claude", environment)]);
   const codexBin = firstExecutable([codex, environment.UNIVERSAL_PEER_CODEX_BIN, "/opt/homebrew/bin/codex", "/usr/local/bin/codex", ...onPath("codex", environment)]);
   const threadCwd = peer.kind === "codex" ? (cwd ?? codexThreadCwd(peer.threadId, codexHome ? { codexHome } : {})) : null;
-  return buildOpenCommand({ alias, peer, root: paths.root, binDir, claudeBin, codexBin, cwd: threadCwd, permissionFlag, environment });
+  return buildOpenCommand({ alias, peer, root: paths.root, binDir, claudeBin, codexBin, cwd: threadCwd, permissionFlag, environment, ...(codexHome ? { codexHome } : {}) });
+}
+
+export function codexAppServerSocket(codexHome = defaultCodexHome()) { return path.join(codexHome, "app-server-control", "app-server-control.sock"); }
+
+// True when something accepts a connection on the socket; a dangling link or a dead socket file is false.
+export function socketAnswers(socket, { timeoutMs = 1000 } = {}) {
+  return new Promise((resolve) => {
+    const connection = net.connect(socket);
+    const done = (ok) => { clearTimeout(timer); connection.destroy(); resolve(ok); };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    connection.once("connect", () => done(true)); connection.once("error", () => done(false));
+  });
+}
+
+// Before a Codex thread is resumed on the shared app server: if nothing answers on its socket, run
+// codex's own start once and wait for the socket. Returns null when it answers, or the reason it does not.
+export async function ensureCodexAppServer(appServer, { spawn = Bun.spawn, answers = socketAnswers, waitMs = 15_000, stepMs = 250, log = (line) => process.stderr.write(line) } = {}) {
+  if (await answers(appServer.socket)) return null;
+  log(`universal-peer: the Codex app server is not running; starting it: ${appServer.start.join(" ")}\n`);
+  // One deadline from the start on: a start that never exits must not hold open past it (Codex review
+  // of faa5c11), and a socket that answers before it exits is enough.
+  const deadline = Date.now() + waitMs;
+  let code = null;
+  // Let go of it rather than kill it: a start still running may be the app server coming up, and it
+  // must not keep `open` from exiting on the failure path either (Codex review r2).
+  try { const child = spawn(appServer.start, { stdin: "ignore", stdout: "ignore", stderr: "inherit" }); child.exited.then((c) => { code = c; }, () => {}); child.unref?.(); }
+  catch (error) { return `could not run ${appServer.start[0]}: ${error?.code ?? error?.message ?? "spawn failed"}`; }
+  do { if (await answers(appServer.socket)) return null; await new Promise((resolve) => setTimeout(resolve, stepMs)); } while (Date.now() < deadline);
+  if (await answers(appServer.socket)) return null;
+  return `the Codex app server did not come up at ${appServer.socket} (start ${code === null ? "still running" : `exited ${code}`})`;
 }
 
 // Runs the planned command in this terminal and returns its exit code. stdio is inherited: the
 // session takes over the pane exactly as if the line had been typed.
-export async function runOpen(plan, { spawn = Bun.spawn } = {}) {
+export async function runOpen(plan, { spawn = Bun.spawn, ensureAppServer = ensureCodexAppServer } = {}) {
+  if (plan.appServer) {
+    const problem = await ensureAppServer(plan.appServer, { spawn });
+    if (problem) { process.stderr.write(`universal-peer: ${problem}. Start it with: ${plan.appServer.start.join(" ")} — then run this open again.\n`); return 1; }
+  }
   const child = spawn(plan.argv, { cwd: plan.cwd, env: { ...process.env, ...plan.env }, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
   return await child.exited;
 }

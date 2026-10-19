@@ -21,7 +21,7 @@ test("a Claude session restarted with --resume <its id> is rebound on its own fi
   const before = await table(L);
   await c1.close();                                            // session ends
   const c1b = await L.claude({ resume: c1.sessionId });        // `claude --resume <id>` → new session id
-  expect((await c1b.run(["whoami"])).json).toEqual({ authenticated: true, alias: "test-claude-1", kind: "claude" });
+  expect((await c1b.run(["whoami"])).json).toEqual({ authenticated: true, alias: "test-claude-1", kind: "claude", reopen: "universal-peer-mcp open test-claude-1" });
   const after = await table(L);
   expect(after["test-claude-1"].sessionId).toBe(c1b.sessionId);
   expect(after["test-claude-2"]).toEqual(before["test-claude-2"]);

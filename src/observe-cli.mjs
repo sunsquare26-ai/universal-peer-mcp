@@ -26,6 +26,13 @@ async function operatorArgs(target) {
   return confirm === null ? {} : { operator: { confirm: confirm.trim() } };
 }
 function option(args, name) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; }
+// The one line that reopens an alias, handed out where a session looks when it is asked "give me the
+// command to restart you / your partner" (`peers`, `whoami`). Measured 2026-10-12 (seq 47164-47751):
+// after a crash four sessions were asked that and built it by hand — install path, state directory,
+// --cwd — one broke on paste, and per-session launcher scripts followed. `open` already reads the
+// folder and the recorded permission mode from the registration; nothing needs to be added to it.
+const reopenLine = (alias) => `universal-peer-mcp open ${alias}`;
+const REOPEN_ALL = "universal-peer-mcp restore";
 
 async function readLedger(file) {
   const rows = [];
@@ -93,8 +100,14 @@ export async function observeCommand(command, args) {
     if (!peers.some((p) => p.alias === alias)) throw Object.assign(new Error(`등록된 별칭이 아닙니다: ${alias} (목록: universal-peer-mcp peers)`), { code: "UNKNOWN_ALIAS" });
     return controlCall("peer_unregister", { alias, ...(await operatorArgs(alias)) });
   }
-  if (command === "peers") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_directory", {}); }
-  if (command === "whoami") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_whoami", {}); }
+  if (command === "peers") {
+    const { controlCall } = await import("./core/control.mjs"); const dir = await controlCall("peer_directory", {});
+    return Array.isArray(dir?.peers) ? { ...dir, peers: dir.peers.map((p) => ({ ...p, reopen: reopenLine(p.alias) })), reopenAll: REOPEN_ALL } : dir;
+  }
+  if (command === "whoami") {
+    const { controlCall } = await import("./core/control.mjs"); const who = await controlCall("peer_whoami", {});
+    return who?.authenticated === true && typeof who.alias === "string" ? { ...who, reopen: reopenLine(who.alias) } : who;
+  }
   if (command === "inbox-ack") { const { controlCall } = await import("./core/control.mjs"); return controlCall("peer_inbox_ack", { messageId: option(args, "--message-id") }); }
   if (command === "link") {
     const { controlCall } = await import("./core/control.mjs");
