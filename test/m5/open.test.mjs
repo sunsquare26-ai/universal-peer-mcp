@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { buildOpenCommand } from "../../src/core/open.mjs";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { buildOpenCommand, ensureCodexAppServer, runOpen, socketAnswers } from "../../src/core/open.mjs";
 
 const base = { root: "/state", binDir: "/opt/upm/bin", claudeBin: "/abs/claude", codexBin: "/abs/codex", environment: { PATH: "/usr/bin" } };
 const claude = (permissionMode) => ({ kind: "claude", sessionId: "10000000-3312-4e8d-8e25-18f525d75bb2", cwd: "/work", permissionMode });
@@ -29,5 +33,45 @@ describe("open builds the one command that keeps a session a peer", () => {
   });
   test("no bin dir, PATH untouched", () => {
     expect(buildOpenCommand({ ...base, binDir: null, alias: "a", peer: claude("bypass") }).env.PATH).toBe("/usr/bin");
+  });
+});
+
+// 2026-10-18: after a reboot `open codex-dev` died on "failed to connect to remote app server …
+// app-server-control.sock: No such file", and the owner had to ask for the command again.
+describe("open starts the Codex app server it resumes on, when nothing answers there", () => {
+  const codexPeer = { kind: "codex", threadId: "01a10000-8d9b-7ba0-8228-4bef09bbe67e" };
+  const plan = () => buildOpenCommand({ ...base, alias: "c", peer: codexPeer, cwd: "/work", codexHome: "/home/.codex" });
+  const quiet = { log: () => {}, stepMs: 1 };
+  test("the codex plan names the socket and codex's own local start", () => {
+    expect(plan().appServer).toEqual({ socket: "/home/.codex/app-server-control/app-server-control.sock", start: ["/abs/codex", "app-server", "daemon", "start"] });
+    expect(buildOpenCommand({ ...base, alias: "a", peer: claude("bypass") }).appServer).toBeUndefined();
+  });
+  test("an app server that answers is left alone", async () => {
+    const spawned = [];
+    expect(await ensureCodexAppServer(plan().appServer, { ...quiet, answers: async () => true, spawn: (argv) => { spawned.push(argv); return { exited: Promise.resolve(0) }; } })).toBeNull();
+    expect(spawned).toEqual([]);
+  });
+  test("one that does not is started once, then waited for", async () => {
+    const spawned = []; let up = false;
+    const result = await ensureCodexAppServer(plan().appServer, { ...quiet, answers: async () => up, spawn: (argv) => { spawned.push(argv); up = true; return { exited: Promise.resolve(0) }; } });
+    expect(result).toBeNull();
+    expect(spawned).toEqual([["/abs/codex", "app-server", "daemon", "start"]]);
+  });
+  test("one that never comes up is reported and codex is not launched", async () => {
+    const launched = [];
+    const spawn = (argv) => { launched.push(argv); return { exited: Promise.resolve(argv[1] === "app-server" ? 1 : 0) }; };
+    const code = await runOpen(plan(), { spawn, ensureAppServer: (appServer, options) => ensureCodexAppServer(appServer, { ...options, ...quiet, waitMs: 5, answers: async () => false }) });
+    expect(code).toBe(1);
+    expect(launched).toEqual([["/abs/codex", "app-server", "daemon", "start"]]);
+  });
+  test("socketAnswers: a dangling link is not an app server, a listening socket is", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "upm-open-"));
+    try {
+      const link = path.join(dir, "gone.sock"); fs.symlinkSync(path.join(dir, "missing"), link);
+      expect(await socketAnswers(link)).toBe(false);
+      const live = path.join(dir, "live.sock"); const server = net.createServer((s) => s.end());
+      await new Promise((resolve) => server.listen(live, resolve));
+      try { expect(await socketAnswers(live)).toBe(true); } finally { server.close(); }
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 });
