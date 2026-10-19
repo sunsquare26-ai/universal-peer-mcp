@@ -72,6 +72,15 @@ describe("open starts the Codex app server it resumes on, when nothing answers t
     let calls = 0;
     expect(await ensureCodexAppServer(plan().appServer, { ...quiet, answers: async () => (calls += 1) > 2, spawn: never })).toBeNull();
   });
+  test("a real start that outlives the deadline does not keep the process alive", async () => {
+    const script = `const { ensureCodexAppServer } = await import(${JSON.stringify(path.resolve(import.meta.dir, "../../src/core/open.mjs"))});
+      const r = await ensureCodexAppServer({ socket: "/nonexistent/upm.sock", start: ["/bin/sleep", "5"] }, { waitMs: 30, stepMs: 5, log: () => {} }); console.log(r);`;
+    const began = Date.now();
+    const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "ignore" });
+    await child.exited;
+    expect(await new Response(child.stdout).text()).toContain("still running");
+    expect(Date.now() - began).toBeLessThan(4000);
+  });
   test("socketAnswers: a dangling link is not an app server, a listening socket is", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "upm-open-"));
     try {

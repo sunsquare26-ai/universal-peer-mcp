@@ -136,7 +136,9 @@ export async function ensureCodexAppServer(appServer, { spawn = Bun.spawn, answe
   // of faa5c11), and a socket that answers before it exits is enough.
   const deadline = Date.now() + waitMs;
   let code = null;
-  try { spawn(appServer.start, { stdin: "ignore", stdout: "ignore", stderr: "inherit" }).exited.then((c) => { code = c; }, () => {}); }
+  // Let go of it rather than kill it: a start still running may be the app server coming up, and it
+  // must not keep `open` from exiting on the failure path either (Codex review r2).
+  try { const child = spawn(appServer.start, { stdin: "ignore", stdout: "ignore", stderr: "inherit" }); child.exited.then((c) => { code = c; }, () => {}); child.unref?.(); }
   catch (error) { return `could not run ${appServer.start[0]}: ${error?.code ?? error?.message ?? "spawn failed"}`; }
   do { if (await answers(appServer.socket)) return null; await new Promise((resolve) => setTimeout(resolve, stepMs)); } while (Date.now() < deadline);
   if (await answers(appServer.socket)) return null;
