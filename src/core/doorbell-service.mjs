@@ -150,11 +150,13 @@ export class DoorbellService {
       try {
         const result = await this.wake.wake({ codexAlias: post.recipient, messageId: post.messageId, target: this.targetFor(post, attempt), attemptKey: attempt.attemptKey });
         const state = result.mode === "held_behind_running_turn" ? "held" : "sent";
-        return record(state, { mode: result.mode, ...(result.turnId ? { turnId: result.turnId } : {}), ...(result.replay ? { replay: true } : {}) });
+        return record(state, { mode: result.mode, ...(result.turnId ? { turnId: result.turnId } : {}), ...(result.replay ? { replay: true } : {}), ...(typeof result.threadState === "string" ? { threadState: result.threadState } : {}) });
       } catch (error) {
         const c = code(error);
         if (c === "DELIVERY_UNCERTAIN") return record("unknown", { errorCode: c });
-        if (c === "TARGET_UNAVAILABLE") return this.#queueFallback(post, attempt);
+        // The thread state the server reported (or notLoaded) goes on the fallback's row: a doorbell
+        // the queue then refuses must say why the server path was not taken (seq 95591 could not).
+        if (c === "TARGET_UNAVAILABLE") return this.#queueFallback(post, attempt, typeof error?.threadState === "string" ? { threadState: error.threadState } : {});
         return record("not_sent", { errorCode: c });
       }
     })();
@@ -199,8 +201,8 @@ export class DoorbellService {
   // The app-server could not say whether the thread is idle or running: the doorbell goes into the
   // CLI queue, which delivers when any running turn ends — so it is recorded as held, never as sent.
   // The release check still applies: without a server to ask, the CLI must match the pinned release.
-  async #queueFallback(post, attempt) {
-    const record = (state, extra = {}) => this.#record(post, state, extra, attempt);
+  async #queueFallback(post, attempt, seen = {}) {
+    const record = (state, extra = {}) => this.#record(post, state, { ...extra, ...seen }, attempt);
     const pin = this.settings.codexVersion?.value;
     if (!pin) return record("not_sent", { errorCode: "VERSION_UNKNOWN", via: "queue" });
     let version = null; try { version = await this.cliVersion(this.settings.codexCli.value); } catch {}

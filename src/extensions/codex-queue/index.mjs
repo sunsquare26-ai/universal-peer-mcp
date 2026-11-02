@@ -122,19 +122,20 @@ export class CodexWake {
   async inspect(alias, action, given = null) {
     const target = await this.target(alias, given);
     const candidates = [target.socketPath, ...((await this.sockets?.()) ?? [])].filter((p, i, a) => typeof p === "string" && a.indexOf(p) === i);
+    let seen = "noServer";   // no candidate answered initialize; "notLoaded": one answered, none listed the thread
     for (const socketPath of candidates) {
       // A candidate that is missing, not a private socket of this user, dead, fails to initialize or
       // does not list the thread is skipped. Once a server lists the thread, its answer is final.
       if (!(await privateSocket(socketPath))) continue;
       try { return await this.#inspectOn({ ...target, socketPath }, action); }
-      catch (error) { if (!error?.skipCandidate) throw error; }
+      catch (error) { if (!error?.skipCandidate) throw error; if (error.skipCandidate === "notLoaded") seen = "notLoaded"; }
     }
-    throw fail("TARGET_UNAVAILABLE");
+    throw Object.assign(fail("TARGET_UNAVAILABLE"), { threadState: seen });
   }
 
   async #inspectOn(target, action) {
     const rpc = this.connect(target.socketPath);
-    const skip = () => Object.assign(fail("THREAD_NOT_HERE"), { skipCandidate: true });
+    const skip = (why = "noServer") => Object.assign(fail("THREAD_NOT_HERE"), { skipCandidate: why });
     try {
       let init;
       try { init = await rpc.call("initialize", { clientInfo: { name: "universal-peer-mcp", version: "0.1.0" }, capabilities: { experimentalApi: true } }); }
@@ -150,7 +151,7 @@ export class CodexWake {
           cursor = result.nextCursor; if (!cursor) break;
         }
       } catch { throw skip(); }
-      if (!loaded) throw skip();
+      if (!loaded) throw skip("notLoaded");
       const serverVersion = versionOf(init?.userAgent);
       if (!serverVersion) throw fail("VERSION_UNKNOWN");
       // The release follows the server (it updates itself): the CLI used with it is chosen now, for
@@ -172,8 +173,14 @@ export class CodexWake {
       // back to the queue as held. The protocol marks full hydration deprecated for paginated threads.
       const { thread } = await rpc.call("thread/read", { threadId: target.threadId });
       if (thread.id !== target.threadId || (target.cwd !== undefined && await fsp.realpath(thread.cwd) !== await fsp.realpath(target.cwd))) throw fail("TARGET_UNAVAILABLE");
-      const state = thread.status?.type;
-      if (!["idle", "active"].includes(state)) throw fail("TARGET_UNAVAILABLE");
+      // `systemError`: the thread's last turn ended in an error (measured 2026-10-28 17:18 KST: a turn
+      // ended `server_overloaded`; a doorbell at 17:32 found the thread unavailable, fell back to the
+      // queue and was not sent, and the message sat 2 h 21 min until the Owner typed "이어서 하자" —
+      // seq 95591..95689). The thread takes a new turn exactly as when idle, so it is rung like idle.
+      // Any other state is unavailable, and the state seen goes with the refusal for the ledger.
+      const observed = typeof thread.status?.type === "string" ? thread.status.type : null;
+      const state = observed === "systemError" ? "idle" : observed;
+      if (!["idle", "active"].includes(state)) throw Object.assign(fail("TARGET_UNAVAILABLE"), { threadState: observed });
       // The running turn's id, when there is one, from the newest turn only (one small page).
       let activeTurnId = null;
       if (state === "active") {
@@ -181,7 +188,7 @@ export class CodexWake {
         const newest = Array.isArray(page?.data) ? page.data[0] : null;
         if (newest?.status === "inProgress" && typeof newest.id === "string" && newest.id) activeTurnId = newest.id;
       }
-      return await action({ rpc, thread, target, state, serverVersion, activeTurnId });
+      return await action({ rpc, thread, target, state, observed, serverVersion, activeTurnId });
     } finally { rpc.close(); }
   }
   async status({ codexAlias }) {
@@ -229,7 +236,7 @@ export class CodexWake {
       if (verdict !== true) throw Object.assign(fail(typeof verdict === "string" ? verdict : "WAKE_NOT_AUTHORIZED"), { beforeWrite: true });
     };
     try {
-      const result = await this.inspect(codexAlias, async ({ rpc, thread, target, state, serverVersion, activeTurnId }) => {
+      const result = await this.inspect(codexAlias, async ({ rpc, thread, target, state, observed, serverVersion, activeTurnId }) => {
         await stillAuthorized();
         if (target.transport === "cli-queue") {
           attempted = true;
@@ -239,14 +246,14 @@ export class CodexWake {
         const params = { threadId: target.threadId, clientUserMessageId: attemptKey, input: [{ type: "text", text: bell, text_elements: [] }] };
         let method = "turn/start";
         if (state === "active") {
-          if (!activeTurnId) throw fail("TARGET_UNAVAILABLE");
+          if (!activeTurnId) throw Object.assign(fail("TARGET_UNAVAILABLE"), { threadState: "activeWithoutTurn" });
           params.expectedTurnId = activeTurnId; method = "turn/steer";
         }
         attempted = true;
         const response = await rpc.call(method, params);
         const turnId = response?.turn?.id ?? response?.turnId;
         if (typeof turnId !== "string" || !turnId) throw fail("DELIVERY_UNCERTAIN");
-        return { accepted: true, mode: state === "active" ? "steered" : "started", turnId, replay: false };
+        return { accepted: true, mode: state === "active" ? "steered" : "started", turnId, replay: false, ...(observed === "systemError" ? { threadState: observed } : {}) };
       }, given);
       await atomicPrivateWrite(file, JSON.stringify({ hash, state: "accepted", result }) + "\n");
       return result;
@@ -254,7 +261,8 @@ export class CodexWake {
       if (!attempted) await fsp.unlink(file);
       if (!attempted && ["VERSION_MISMATCH", "VERSION_UNKNOWN"].includes(error?.code)) throw fail(error.code);
       if (!attempted && error?.beforeWrite) throw fail(error.code);
-      throw fail(attempted ? "DELIVERY_UNCERTAIN" : "TARGET_UNAVAILABLE");
+      if (attempted) throw fail("DELIVERY_UNCERTAIN");
+      throw Object.assign(fail("TARGET_UNAVAILABLE"), typeof error?.threadState === "string" ? { threadState: error.threadState } : {});
     }
   }
 }

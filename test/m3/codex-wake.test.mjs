@@ -87,6 +87,26 @@ test("app-server, running turn: turn/steer into that turn with the doorbell only
   } finally { server.close(); }
 });
 
+test("a thread whose last turn ended in an error (systemError) takes a new turn like idle (seq 95591: it was refused and sat 2 h 21 min)", async () => {
+  const r = await root(); const server = await appServerTarget(r); const log = []; const id = crypto.randomUUID();
+  try {
+    expect(await new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.159.0", state: "systemError", calls: log }) }).wake({ codexAlias: "codex-main", messageId: id })).toMatchObject({ mode: "started", turnId: "turn-2", threadState: "systemError" });
+    const [, params] = log.find(([m]) => m === "turn/start");
+    expect(params.input).toEqual([{ type: "text", text: bell(id), text_elements: [] }]);
+    expect(log.some(([m]) => m === "turn/steer")).toBe(false);
+  } finally { server.close(); }
+});
+
+test("a refusal before any write names the thread state it saw (notLoaded, or a status that is neither idle nor active)", async () => {
+  const r = await root(); const server = await appServerTarget(r); const log = [];
+  try {
+    await expect(new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.159.0", state: "waitingSomething", calls: log }) }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "TARGET_UNAVAILABLE", threadState: "waitingSomething" });
+    const notLoaded = (sock) => { const base = fakeConnect({ root: r, version: "0.159.0" })(sock); return { ...base, call: async (m, p) => (m === "thread/loaded/list" ? { data: [] } : base.call(m, p)) }; };
+    await expect(new CodexWake({ root: r, connect: notLoaded }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "TARGET_UNAVAILABLE", threadState: "notLoaded" });
+    expect(log.some(([m]) => m === "turn/start" || m === "turn/steer")).toBe(false);
+  } finally { server.close(); }
+});
+
 test("the same messageId is answered from the reservation, never sent twice", async () => {
   const r = await root(); const cli = await writeCli(r); await writeTargets(r, queueTarget(r, cli));
   const wake = new CodexWake({ root: r, connect: fakeConnect({ root: r }) }); const id = crypto.randomUUID();

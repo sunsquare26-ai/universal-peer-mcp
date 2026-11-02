@@ -162,6 +162,20 @@ test("the server cannot say the thread state: the CLI queue gets the doorbell, r
   expect(u.rows("doorbell_outcome")[0]).toMatchObject({ state: "not_sent", errorCode: "VERSION_UNKNOWN" });
 });
 
+test("the queue fallback's row carries the thread state the server path saw (seq 95591 said only VERSION_MISMATCH)", async () => {
+  const unavailable = Object.assign(new Error("x"), { code: "TARGET_UNAVAILABLE" });
+  const s = await stand({ wakeError: unavailable, pin: "0.157.0" }); const post = await s.postTo();
+  await s.service.onAppend(post);
+  expect(s.rows("doorbell_outcome")[0]).toMatchObject({ state: "not_sent", errorCode: "VERSION_MISMATCH", via: "queue", threadState: "noServer" });
+});
+
+test("a thread after a failed turn (systemError) is rung with a new turn and the row says so", async () => {
+  const s = await stand({ state: "systemError" }); const post = await s.postTo();
+  await s.service.onAppend(post);
+  expect(s.rows("doorbell_outcome")[0]).toMatchObject({ state: "sent", mode: "started", threadState: "systemError" });
+  expect(s.calls.filter(([m]) => m === "turn/start")).toHaveLength(1);
+});
+
 test("two rings at the same moment for two aliases/threads: each reaches its own thread", async () => {
   const s = await stand({ peers: { "test-codex-1": { threadId: T1 }, "test-codex-2": { threadId: T2 } } });
   // A barrier: both calls are inside the app-server conversation before either reaches turn/start.
