@@ -122,13 +122,16 @@ export class CodexWake {
   async inspect(alias, action, given = null) {
     const target = await this.target(alias, given);
     const candidates = [target.socketPath, ...((await this.sockets?.()) ?? [])].filter((p, i, a) => typeof p === "string" && a.indexOf(p) === i);
-    let seen = "noServer";   // no candidate answered initialize; "notLoaded": one answered, none listed the thread
+    // What the candidates showed, the most telling kept: "listFailed" (a server answered but its
+    // loaded list failed — it may hold the thread) over "notLoaded" (answered, did not list it) over
+    // "noServer" (none answered initialize).
+    const rank = ["noServer", "notLoaded", "listFailed"]; let seen = "noServer";
     for (const socketPath of candidates) {
       // A candidate that is missing, not a private socket of this user, dead, fails to initialize or
       // does not list the thread is skipped. Once a server lists the thread, its answer is final.
       if (!(await privateSocket(socketPath))) continue;
       try { return await this.#inspectOn({ ...target, socketPath }, action); }
-      catch (error) { if (!error?.skipCandidate) throw error; if (error.skipCandidate === "notLoaded") seen = "notLoaded"; }
+      catch (error) { if (!error?.skipCandidate) throw error; if (rank.indexOf(error.skipCandidate) > rank.indexOf(seen)) seen = error.skipCandidate; }
     }
     throw Object.assign(fail("TARGET_UNAVAILABLE"), { threadState: seen });
   }
@@ -150,7 +153,7 @@ export class CodexWake {
           if (result.data?.includes(target.threadId)) { loaded = true; break; }
           cursor = result.nextCursor; if (!cursor) break;
         }
-      } catch { throw skip(); }
+      } catch { throw skip("listFailed"); }
       if (!loaded) throw skip("notLoaded");
       const serverVersion = versionOf(init?.userAgent);
       if (!serverVersion) throw fail("VERSION_UNKNOWN");
@@ -271,6 +274,6 @@ export function codexWakeTools() {
   const codexAlias = { type: "string", pattern: "^[a-z][a-z0-9-]{1,47}$" };
   return [
     { name: "codex_status", description: "Check an allowlisted Codex binding. queue_configured validates configuration only, not a live consumer. Does not run a model.", inputSchema: { type: "object", required: ["codexAlias"], properties: { codexAlias }, additionalProperties: false }, outputSchema: { type: "object", required: ["available", "state"], properties: { available: { type: "boolean" }, state: { type: "string", enum: ["idle", "active", "unavailable"] } }, additionalProperties: false } },
-    { name: "codex_wake", description: "Ring the fixed doorbell (PEER_DOORBELL v=1 message_id=<id>) on an allowlisted Codex thread for a message already in the daemon inbox. Never carries a body. Idle thread: starts a turn; running turn: steers it (app-server) or is held until it ends (CLI queue). queued/held are not delivery; the receiving model's peer_inbox_ack is. Never retried automatically.", inputSchema: { type: "object", required: ["codexAlias", "messageId"], properties: { codexAlias, messageId: { type: "string", format: "uuid" } }, additionalProperties: false }, outputSchema: { type: "object", required: ["accepted", "mode", "turnId", "replay"], properties: { accepted: { type: "boolean" }, mode: { type: "string", enum: ["started", "steered", "queued", "held_behind_running_turn"] }, turnId: { type: ["string", "null"] }, replay: { type: "boolean" } }, additionalProperties: false } }
+    { name: "codex_wake", description: "Ring the fixed doorbell (PEER_DOORBELL v=1 message_id=<id>) on an allowlisted Codex thread for a message already in the daemon inbox. Never carries a body. Idle thread: starts a turn; running turn: steers it (app-server) or is held until it ends (CLI queue). queued/held are not delivery; the receiving model's peer_inbox_ack is. Never retried automatically.", inputSchema: { type: "object", required: ["codexAlias", "messageId"], properties: { codexAlias, messageId: { type: "string", format: "uuid" } }, additionalProperties: false }, outputSchema: { type: "object", required: ["accepted", "mode", "turnId", "replay"], properties: { accepted: { type: "boolean" }, mode: { type: "string", enum: ["started", "steered", "queued", "held_behind_running_turn"] }, turnId: { type: ["string", "null"] }, replay: { type: "boolean" }, threadState: { type: "string", enum: ["systemError"] } }, additionalProperties: false } }
   ];
 }

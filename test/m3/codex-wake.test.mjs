@@ -103,6 +103,11 @@ test("a refusal before any write names the thread state it saw (notLoaded, or a 
     await expect(new CodexWake({ root: r, connect: fakeConnect({ root: r, version: "0.159.0", state: "waitingSomething", calls: log }) }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "TARGET_UNAVAILABLE", threadState: "waitingSomething" });
     const notLoaded = (sock) => { const base = fakeConnect({ root: r, version: "0.159.0" })(sock); return { ...base, call: async (m, p) => (m === "thread/loaded/list" ? { data: [] } : base.call(m, p)) }; };
     await expect(new CodexWake({ root: r, connect: notLoaded }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "TARGET_UNAVAILABLE", threadState: "notLoaded" });
+    // A server that answered but whose loaded list failed may hold the thread: that outranks notLoaded.
+    const other = path.join(r, "o.sock"); const net = await import("node:net"); const s2 = net.createServer(() => {}); await new Promise((ok) => s2.listen(other, ok)); await fs.chmod(other, 0o600);
+    const mixed = (sock) => { const base = fakeConnect({ root: r, version: "0.159.0" })(sock); return { ...base, call: async (m, p) => (m === "thread/loaded/list" ? (sock === other ? Promise.reject(new Error("list")) : { data: [] }) : base.call(m, p)) }; };
+    try { await expect(new CodexWake({ root: r, connect: mixed, sockets: () => [other] }).wake({ codexAlias: "codex-main", messageId: crypto.randomUUID() })).rejects.toMatchObject({ code: "TARGET_UNAVAILABLE", threadState: "listFailed" }); }
+    finally { s2.close(); }
     expect(log.some(([m]) => m === "turn/start" || m === "turn/steer")).toBe(false);
   } finally { server.close(); }
 });
