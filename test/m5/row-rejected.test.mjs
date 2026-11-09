@@ -134,7 +134,8 @@ test("review r1 P2: other broken rows do not use up the bound before the row ask
   const s = await bench(); const me = { pid: process.pid, procStart: processStart(process.pid) };
   for (let i = 0; i < 12; i += 1) await writeRow(s, 100 + i, `${JSON.stringify(rowOf(s, 100 + i, me.procStart, B))}!`, 0o666);
   await writeRow(s, me.pid, `${JSON.stringify(rowOf(s, me.pid, me.procStart, A))}!`);
-  expect((await sessionPresence(A, { sessionsDir: s.sessionsDir })).rejectedRow).toEqual({ pid: me.pid, problem: "row_unparsable", sessionId: A });
+  // every pid reads as this account's, so the other twelve would all have been collectable
+  expect((await sessionPresence(A, { sessionsDir: s.sessionsDir, processUidReader: () => process.getuid() })).rejectedRow).toEqual({ pid: me.pid, problem: "row_unparsable", sessionId: A });
 });
 
 test("review r1 P1: a refused row over 64 KiB is not read for its claim", async () => {
