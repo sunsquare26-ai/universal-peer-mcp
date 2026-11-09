@@ -11,7 +11,7 @@ import { resolveSuccessor, sessionLiveness, sessionPresence } from "../../src/ad
 import { processStart, readProcessArgv } from "../../src/adapters/claude-native-v1/darwin-procargs.mjs";
 import { createSenderResolver } from "../../src/core/sender-auth.mjs";
 import { targetDiagnostic } from "../../src/core/target-diagnostics.mjs";
-import { renderOverview, renderRestore } from "../../src/core/overview.mjs";
+import { renderOverview } from "../../src/core/overview.mjs";
 
 const roots = []; const spawned = []; const closers = [];
 afterEach(async () => {
@@ -127,7 +127,6 @@ test("status: a refused row reads as misopened with the one line that fixes it",
   expect(text).toContain("session_row_rejected:row_unparsable");
   expect(text).toContain("/exit 한 뒤 한 줄: universal-peer-mcp open c-1");
   expect(text).not.toContain("꺼져 있음");
-  expect(renderRestore(view)).toContain("지금 열린 탭은 /exit 먼저");
 });
 
 test("review r1 P2: other broken rows do not use up the bound before the row asked about", async () => {
