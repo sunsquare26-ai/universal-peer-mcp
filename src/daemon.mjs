@@ -43,7 +43,7 @@ import { controllingTty, OPERATOR_LABEL, operatorPhrase } from "./core/operator.
 import { aliasOfCodexThread, codexPeersDigest, codexPeersPath, identityKey, listPeers, loadCodexPeers, registerPeer, removePeer, resolvePeer } from "./core/peer-directory.mjs";
 import { processParent, provePermissionMode, readProcessArgv } from "./adapters/claude-native-v1/darwin-procargs.mjs";
 import { readRebindState } from "./core/rebind-sidecar.mjs";
-import { DEFAULT_SESSIONS_DIR, sessionLiveness } from "./adapters/claude-native-v1/registry.mjs";
+import { DEFAULT_SESSIONS_DIR, sessionPresence } from "./adapters/claude-native-v1/registry.mjs";
 import { sameUuid } from "./core/limits.mjs";
 
 const buildObservation = observeBuild();
@@ -219,14 +219,17 @@ store.onAppendFailed = (row, error) => {
 };
 // M5 F2: a Claude recipient that was away and is back in the registry gets its refused doorbells
 // rung once more. Liveness is the registry reading every resolver uses (pid and its start time).
-const claudeLiveness = (sessionId) => sessionLiveness(sessionId, claudeSessionsDir ? { sessionsDir: claudeSessionsDir } : {});
 // M5: running is not enough — a session reopened as a bare `claude --resume` (no absolute argv[0],
 // no --permission-mode) is in the registry but cannot be written to. "misopened" says so, with the
 // resolver's reason; only "running" (the resolve a send does would succeed) lets a doorbell be rung
 // again. Measured 2026-10-07: a re-ring spent itself on such a session (argv_executable_mismatch).
+// A session whose row is there but was refused as a file is shown as misopened with that reason
+// (seq 99197-99201: it was shown "off" while in use, and the advice that followed was wrong). Its
+// fix is the misopened one — /exit in that tab, then `open` — and it is never rung again from here.
 async function claudePresence(alias, sessionId) {
-  const live = await claudeLiveness(sessionId);
-  if (live !== "running") return { state: live, reason: null };
+  const presence = await sessionPresence(sessionId, claudeSessionsDir ? { sessionsDir: claudeSessionsDir } : {});
+  const live = presence.state;
+  if (live !== "running") return presence.rejectedRow ? { state: "misopened", reason: `session_row_rejected:${presence.rejectedRow.problem}` } : { state: live, reason: null };
   const probe = await core.reachable(alias);
   return probe.reachable ? { state: "running", reason: null } : { state: "misopened", reason: probe.reason };
 }
@@ -329,7 +332,7 @@ async function dispatch(method, args, caller = null) {
   if (method === "peer_directory") return directory();
   if (method === "peer_overview") return peerOverview();
   if (method === "peer_post_relink") return relink(args, caller);
-  if (method === "peer_whoami") { const who = await identifyCaller(caller); return who.authenticated ? { authenticated: true, alias: who.alias, kind: who.kind } : { authenticated: false, kind: who.kind ?? null, reason: who.reason, ...(who.rebind ? { rebind: who.rebind } : {}) }; }
+  if (method === "peer_whoami") { const who = await identifyCaller(caller); return who.authenticated ? { authenticated: true, alias: who.alias, kind: who.kind } : { authenticated: false, kind: who.kind ?? null, reason: who.reason, ...(who.rebind ? { rebind: who.rebind } : {}), ...(who.reason === "session_row_rejected" ? { rowProblem: who.rowProblem, hint: rowRejectedHint(who) } : {}) }; }
   if (method === "peer_link_unmatched") { const op = await requireOperator(caller, args, "link", String(args.sourceSeq)); return linkUnmatched(store, { sourceSeq: args.sourceSeq, messageId: args.messageId, as: args.as, verdict: args.verdict ?? null, by: { linkedByPid: caller?.pid, operator: OPERATOR_LABEL, operatorTty: op.tty } }); }
   if (method === "inbound_body_dispose") { if (!Number.isInteger(args.sourceSeq) || args.sourceSeq < 1 || !["processed", "discard"].includes(args.disposition)) throw Object.assign(new Error("sourceSeq must be a positive integer and disposition processed or discard"), { code: "INVALID_CONTROL_ARGUMENTS" }); if (!(await ownsBody(caller, args.sourceSeq))) await requireOperator(caller, args, "dispose", String(args.sourceSeq)); return disposeInboundBody({ root: paths.root, store, sourceSeq: args.sourceSeq, disposition: args.disposition }); }
   if (method === "trace_message") { if (typeof args.messageId !== "string" || !/^[0-9a-f-]{36}$/i.test(args.messageId)) throw Object.assign(new Error("messageId must be a uuid"), { code: "INVALID_CONTROL_ARGUMENTS" }); return traceMessage(store.events, args.messageId); }
@@ -470,8 +473,16 @@ async function identifyCallerOnce(caller) {
     return { authenticated: false, kind: "claude", reason: claude.reason, ...(claude.rebind ? { rebind: claude.rebind } : {}), sessionId: claude.sessionId, pid: claude.pid, procStart: claude.procStart, cwd: claude.cwd };
   }
   if (claude.reason !== "no_session_row") return { authenticated: false, kind: "claude", reason: claude.reason };
+  // A Claude row was on the caller's ancestry and was refused as a file: say so, rather than "no
+  // session", so the session and the owner reopen it instead of hunting for the wrong cause.
+  if (!codex.proven && codex.reason === "no_codex_thread" && claude.refusedRow) return { authenticated: false, kind: "claude", reason: "session_row_rejected", rowProblem: claude.refusedRow.problem, rowPid: claude.refusedRow.pid };
   if (!codex.proven) return codex.reason === "no_codex_thread" ? { authenticated: false, kind: null, reason: "no_session" } : { authenticated: false, kind: "codex", reason: codex.reason };
   return codexCaller(codex);
+}
+// The one line for a session whose own registry row was refused. Which alias it is cannot be known
+// (the row is what would say), so the line names the form, and the session's own tab.
+function rowRejectedHint(who) {
+  return `이 Claude 세션의 등록 파일(~/.claude/sessions/${who.rowPid}.json)을 믿을 수 없어(${who.rowProblem}) 세션을 증명하지 못했습니다. 세션은 켜져 있어도 이 상태로는 알림을 받지 못합니다. 이 탭에서 /exit 한 뒤 터미널에서 한 줄: universal-peer-mcp open <이 세션의 별칭> — 다시 열면 Claude 가 등록 파일을 새로 씁니다.`;
 }
 function codexCaller(codex) {
   const alias = aliasOfCodexThread(codexPeers, codex.threadId);
@@ -582,7 +593,7 @@ async function register(args, caller) {
     identity = { kind: "claude", sessionId: who.sessionId, cwd, permissionMode };
   } else if (who.kind === "codex" && (who.authenticated || who.reason === "session_not_allowlisted")) {
     identity = { kind: "codex", threadId: who.threadId };
-  } else return refused(who.reason ?? "no_session");
+  } else return refused(who.reason ?? "no_session", who.reason === "session_row_rejected" ? rowRejectedHint(who) : null);
   let result;
   try { result = await registerPeer({ targetsFile: paths.targets, codexFile: codexPeersFile, alias: args.alias, identity, replace: args.replace === true }); }
   catch (error) { await store.append("peer_register_refused", { reason: typeof error?.code === "string" ? error.code : "INTERNAL_FAILURE", alias: /^[a-z][a-z0-9-]{1,47}$/.test(args.alias) ? args.alias : null, kind: identity.kind, peerPid: caller?.pid }).catch(() => {}); throw error; }

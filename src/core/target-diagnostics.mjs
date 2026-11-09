@@ -16,6 +16,8 @@ const DIAGNOSTICS = new Set([
   "rebound_via_resume_chain", "rebind_no_proof", "rebind_ambiguous", "rebind_disabled", "rebind_write_failed",
   // M2: a successor must be a new process. The same process under a new session id is `/clear` or
   // a picker switch, and a receipt for an id older than the one the table holds is a chain.
-  "rebind_same_process", "rebind_chain_unsupported", "rebind_fork_refused"
+  "rebind_same_process", "rebind_chain_unsupported", "rebind_fork_refused",
+  // M5: the row for the held id is present and was refused as a file — not "nothing is running".
+  "session_row_rejected"
 ]);
 export function targetDiagnostic(value) { return DIAGNOSTICS.has(value) ? value : undefined; }

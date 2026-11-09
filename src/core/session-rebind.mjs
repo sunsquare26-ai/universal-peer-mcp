@@ -125,6 +125,7 @@ export function createSessionRebinder({
         candidateCount: Number.isInteger(error?.candidateCount) ? error.candidateCount : 0,
         ...(typeof error?.cwdCheck === "string" ? { cwdCheck: error.cwdCheck } : {}),
         ...(Array.isArray(error?.liveCandidates) ? { liveCandidates: error.liveCandidates } : {}),
+        ...(Array.isArray(error?.rejectedRows) ? { rejectedRows: error.rejectedRows } : {}),
         recovery: typeof error?.message === "string" ? error.message : "target could not be resolved"
       });
       if (row && error && typeof error === "object") error.rebindFailedSeq = row.seq;
