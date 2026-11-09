@@ -44,7 +44,7 @@ export async function resolveSuccessor(expected, options = {}) {
   // the resolver judges it, plus (c) the directory the table recorded — both read off the row, so a
   // directory full of other lanes' rows costs nothing extra. `boundary` is every live session in it,
   // this lane or another, and it is what the argv walk is not allowed to walk through.
-  const rejected = [];
+  const rejected = wanting(expected.sessionId);
   const live = await liveRows(reading, () => true, rejected);
   const boundary = new Set(live.map(({ row }) => row.pid).filter((pid) => Number.isInteger(pid)));
   const sameLane = (await sameLaneRows(live, expected)).filter(({ row }) => !isSelfRow(row, options));
@@ -65,7 +65,7 @@ export async function resolveSuccessor(expected, options = {}) {
   // Nothing proves a successor, and the row for the very id the table holds is there but was not
   // trusted as a file. The session is most likely the one that is running; what is broken is the
   // row, and reopening the session is what rewrites it (seq 99199: this was "live: none").
-  const refusedRow = proven.length === 0 ? rejected.find((entry) => claims(entry, expected.sessionId)) : null;
+  const refusedRow = proven.length === 0 ? rejected.rows[0] ?? null : null;
   if (refusedRow) {
     throw Object.assign(new Error(`target session ${expected.sessionId} has a registry row (pid ${refusedRow.pid}) that was not trusted (${refusedRow.problem}); the session may be running. close it and reopen it with universal-peer-mcp open <alias>, which makes Claude Code write the row again`), {
       diagnostic: "session_row_rejected", expectedSessionId: expected.sessionId, candidateCount: 0, cwdCheck,
@@ -118,8 +118,9 @@ function readerOptions(options) {
 // names, and which `accept` wants. It is the one place a row becomes a live candidate, so the
 // exact-match path and the succession path cannot drift apart about what "live" means.
 //
-// `rejected`, when given, also collects the rows that were refused as *files* while a process of
-// this account with that pid is running — a row that could not be read, parsed or trusted. Those
+// `rejected`, when given ({ wants(sessionId), rows }), also collects the rows that were refused as
+// *files*, claim a session id `wants` asks about, and name a pid that is a running process of this
+// account — a row that could not be read, parsed or trusted. Those
 // are never candidates; they are kept only so a refusal can say "the row is there and was not
 // trusted" instead of "nothing is running". Measured 2026-11-08 (seq 99197-99201): a session that
 // had been reachable for twelve days was reported off for seven hours while it was in use, the
@@ -171,26 +172,34 @@ export function rowFileProblem(stat) {
 // The session id a refused row claims, for a diagnostic only — never for a decision. Read with
 // O_NOFOLLOW|O_NONBLOCK and only if it is still a regular file under 64 KiB, so a file swapped for a
 // FIFO or a link after the first look cannot stall or redirect the daemon.
+const CLAIM_READ_BYTES = 65536;
 export async function claimedSessionId(file) {
   let handle = null;
   try {
     handle = await fsp.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > 65536) return null;
-    const text = await handle.readFile("utf8");
+    if (!stat.isFile() || stat.size > CLAIM_READ_BYTES) return null;
+    // The read itself is bounded, not only the size seen before it: a file others can write may
+    // grow between the stat and the read (review r1 P1).
+    const buffer = Buffer.alloc(CLAIM_READ_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, CLAIM_READ_BYTES, 0);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
     const match = /"sessionId"\s*:\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"/.exec(text);
     return match ? match[1].toLowerCase() : null;
   } catch { return null; } finally { await handle?.close().catch(() => {}); }
 }
 
+// The claim is matched first, so a directory of other broken rows neither costs a process lookup
+// each nor uses up the bound before the row asked about is reached (review r1 P2).
 async function noteRejectedRow(rejected, file, name, problem, uidReader) {
+  if (problem === "row_not_regular_file" || rejected.rows.length >= MAX_REPORTED_CANDIDATES) return;
+  const sessionId = await claimedSessionId(file);
+  if (sessionId === null || !rejected.wants(sessionId)) return;
   const pid = Number(name.slice(0, -".json".length));
   try { if (uidReader(pid) !== process.getuid()) return; } catch { return; }
-  if (rejected.length >= MAX_REPORTED_CANDIDATES) return;
-  rejected.push({ pid, problem, sessionId: problem === "row_not_regular_file" ? null : await claimedSessionId(file) });
+  rejected.rows.push({ pid, problem, sessionId });
 }
-
-const claims = (entry, sessionId) => typeof entry.sessionId === "string" && entry.sessionId === String(sessionId).toLowerCase();
+const wanting = (sessionId) => ({ wants: (claimed) => claimed === String(sessionId).toLowerCase(), rows: [] });
 
 // The rows a successor could come from: a live session of this product, on this protocol, with the
 // features this build needs, in the directory the operator's table recorded, and not already the id
@@ -208,10 +217,10 @@ export async function sessionLiveness(sessionId, options = {}) {
 // refused as a file (`liveRows`). `state` is unchanged by it: a refused row is never "running".
 export async function sessionPresence(sessionId, options = {}) {
   try {
-    const rejected = [];
+    const rejected = wanting(sessionId);
     const rows = await liveRows(readerOptions(options), (row) => typeof row.sessionId === "string" && row.sessionId.toLowerCase() === String(sessionId).toLowerCase(), rejected);
     if (rows.length > 0) return { state: "running", rejectedRow: null };
-    return { state: "not_running", rejectedRow: rejected.find((entry) => claims(entry, sessionId)) ?? null };
+    return { state: "not_running", rejectedRow: rejected.rows[0] ?? null };
   } catch { return { state: "unknown", rejectedRow: null }; }
 }
 

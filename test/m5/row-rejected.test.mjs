@@ -129,3 +129,16 @@ test("status: a refused row reads as misopened with the one line that fixes it",
   expect(text).not.toContain("꺼져 있음");
   expect(renderRestore(view)).toContain("지금 열린 탭은 /exit 먼저");
 });
+
+test("review r1 P2: other broken rows do not use up the bound before the row asked about", async () => {
+  const s = await bench(); const me = { pid: process.pid, procStart: processStart(process.pid) };
+  for (let i = 0; i < 12; i += 1) await writeRow(s, 100 + i, `${JSON.stringify(rowOf(s, 100 + i, me.procStart, B))}!`, 0o666);
+  await writeRow(s, me.pid, `${JSON.stringify(rowOf(s, me.pid, me.procStart, A))}!`);
+  expect((await sessionPresence(A, { sessionsDir: s.sessionsDir })).rejectedRow).toEqual({ pid: me.pid, problem: "row_unparsable", sessionId: A });
+});
+
+test("review r1 P1: a refused row over 64 KiB is not read for its claim", async () => {
+  const s = await bench(); const me = { pid: process.pid, procStart: processStart(process.pid) };
+  await writeRow(s, me.pid, `${" ".repeat(70000)}${JSON.stringify(rowOf(s, me.pid, me.procStart, A))}!`);
+  expect(await sessionPresence(A, { sessionsDir: s.sessionsDir })).toEqual({ state: "not_running", rejectedRow: null });
+});
