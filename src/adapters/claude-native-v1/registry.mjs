@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -43,7 +44,8 @@ export async function resolveSuccessor(expected, options = {}) {
   // the resolver judges it, plus (c) the directory the table recorded — both read off the row, so a
   // directory full of other lanes' rows costs nothing extra. `boundary` is every live session in it,
   // this lane or another, and it is what the argv walk is not allowed to walk through.
-  const live = await liveRows(reading, () => true);
+  const rejected = wanting(expected.sessionId);
+  const live = await liveRows(reading, () => true, rejected);
   const boundary = new Set(live.map(({ row }) => row.pid).filter((pid) => Number.isInteger(pid)));
   const sameLane = (await sameLaneRows(live, expected)).filter(({ row }) => !isSelfRow(row, options));
   const cwdCheck = expected?.cwd == null ? "skipped" : "enforced";
@@ -59,6 +61,16 @@ export async function resolveSuccessor(expected, options = {}) {
     // chain (A -> B -> C). Nothing proves C took over B, so it is refused by name, not as "no proof".
     const chained = sameLane.some((entry) => options.previousSessionIds.some((id) => proveResumeSuccession(entry.row.pid, id, { argvReader, parentReader, boundary })));
     if (chained) throw Object.assign(new Error(`alias session ${expected.sessionId} has no successor; a live session resumes an older id of this alias, and chained succession is not supported — re-register the alias by hand`), { diagnostic: "rebind_chain_unsupported", expectedSessionId: expected.sessionId, candidateCount: 0, cwdCheck, liveCandidates: reportedCandidates(sameLane) });
+  }
+  // Nothing proves a successor, and the row for the very id the table holds is there but was not
+  // trusted as a file. The session is most likely the one that is running; what is broken is the
+  // row, and reopening the session is what rewrites it (seq 99199: this was "live: none").
+  const refusedRow = proven.length === 0 ? rejected.rows[0] ?? null : null;
+  if (refusedRow) {
+    throw Object.assign(new Error(`target session ${expected.sessionId} has a registry row (pid ${refusedRow.pid}) that was not trusted (${refusedRow.problem}); the session may be running. close it and reopen it with universal-peer-mcp open <alias>, which makes Claude Code write the row again`), {
+      diagnostic: "session_row_rejected", expectedSessionId: expected.sessionId, candidateCount: 0, cwdCheck,
+      liveCandidates: reportedCandidates(sameLane), rejectedRows: [{ pid: refusedRow.pid, problem: refusedRow.problem }]
+    });
   }
   if (proven.length !== 1) {
     const diagnostic = proven.length === 0 ? "rebind_no_proof" : "rebind_ambiguous";
@@ -105,12 +117,22 @@ function readerOptions(options) {
 // Every row in `~/.claude/sessions` this account wrote, whose process is still the process the row
 // names, and which `accept` wants. It is the one place a row becomes a live candidate, so the
 // exact-match path and the succession path cannot drift apart about what "live" means.
-async function liveRows({ sessionsDir, startReader, uidReader }, accept) {
+//
+// `rejected`, when given ({ wants(sessionId), rows }), also collects the rows that were refused as
+// *files*, claim a session id `wants` asks about, and name a pid that is a running process of this
+// account — a row that could not be read, parsed or trusted. Those
+// are never candidates; they are kept only so a refusal can say "the row is there and was not
+// trusted" instead of "nothing is running". Measured 2026-11-08 (seq 99197-99201): a session that
+// had been reachable for twelve days was reported off for seven hours while it was in use, the
+// owner relayed the message by hand and reopened the session twice (seq 99777). A row whose
+// process has ended or been replaced is an ended session, not a broken row, and is not collected.
+async function liveRows({ sessionsDir, startReader, uidReader }, accept, rejected = null) {
   const rows = [];
   for (const name of await fsp.readdir(sessionsDir)) {
     if (!/^\d+\.json$/.test(name)) continue;
+    const file = path.join(sessionsDir, name);
+    let problem = null;
     try {
-      const file = path.join(sessionsDir, name);
       const stat = await fsp.lstat(file);
       // The one file in this adapter judged on write alone, because it is the one we do not write.
       // Claude Code 2.1.260 publishes ~/.claude/sessions/<pid>.json at 0644 — measured on every
@@ -120,15 +142,64 @@ async function liveRows({ sessionsDir, startReader, uidReader }, accept) {
       // mode can still prove about a file we do not own is that no other account can rewrite it,
       // and rewriting it is the whole attack — a row another account can edit points this resolver
       // at a socket of its choosing. So group and other write are refused and read is not.
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0) continue;
-      const row = JSON.parse(await fsp.readFile(file, "utf8"));
+      problem = rowFileProblem(stat);
+      if (problem) continue;
+      problem = "row_unreadable";
+      const text = await fsp.readFile(file, "utf8");
+      problem = "row_unparsable";
+      const row = JSON.parse(text);
+      problem = null;
       if (!accept(row)) continue;
-      if (typeof row.procStart !== "string" || uidReader(row.pid) !== process.getuid() || normalizeProcStart(startReader(row.pid)) !== normalizeProcStart(row.procStart)) continue;
+      if (typeof row.procStart !== "string") { problem = "row_malformed"; continue; }
+      if (uidReader(row.pid) !== process.getuid() || normalizeProcStart(startReader(row.pid)) !== normalizeProcStart(row.procStart)) continue;
       rows.push({ row, file });
-    } catch {}
+    } catch {} finally {
+      if (problem && rejected) await noteRejectedRow(rejected, file, name, problem, uidReader);
+    }
   }
   return rows;
 }
+
+// What is wrong with a row as a file, or null. Shared with the sender check (src/core/sender-auth.mjs)
+// so "this row is not trusted" means one thing everywhere.
+export function rowFileProblem(stat) {
+  if (!stat.isFile() || stat.isSymbolicLink()) return "row_not_regular_file";
+  if (stat.uid !== process.getuid()) return "row_foreign_owner";
+  if ((stat.mode & 0o022) !== 0) return "row_writable_by_others";
+  return null;
+}
+
+// The session id a refused row claims, for a diagnostic only — never for a decision. Read with
+// O_NOFOLLOW|O_NONBLOCK and only if it is still a regular file under 64 KiB, so a file swapped for a
+// FIFO or a link after the first look cannot stall or redirect the daemon.
+const CLAIM_READ_BYTES = 65536;
+export async function claimedSessionId(file) {
+  let handle = null;
+  try {
+    handle = await fsp.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > CLAIM_READ_BYTES) return null;
+    // The read itself is bounded, not only the size seen before it: a file others can write may
+    // grow between the stat and the read (review r1 P1).
+    const buffer = Buffer.alloc(CLAIM_READ_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, CLAIM_READ_BYTES, 0);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    const match = /"sessionId"\s*:\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"/.exec(text);
+    return match ? match[1].toLowerCase() : null;
+  } catch { return null; } finally { await handle?.close().catch(() => {}); }
+}
+
+// The claim is matched first, so a directory of other broken rows neither costs a process lookup
+// each nor uses up the bound before the row asked about is reached (review r1 P2).
+async function noteRejectedRow(rejected, file, name, problem, uidReader) {
+  if (problem === "row_not_regular_file" || rejected.rows.length >= MAX_REPORTED_CANDIDATES) return;
+  const sessionId = await claimedSessionId(file);
+  if (sessionId === null || !rejected.wants(sessionId)) return;
+  const pid = Number(name.slice(0, -".json".length));
+  try { if (uidReader(pid) !== process.getuid()) return; } catch { return; }
+  rejected.rows.push({ pid, problem, sessionId });
+}
+const wanting = (sessionId) => ({ wants: (claimed) => claimed === String(sessionId).toLowerCase(), rows: [] });
 
 // The rows a successor could come from: a live session of this product, on this protocol, with the
 // features this build needs, in the directory the operator's table recorded, and not already the id
@@ -140,10 +211,17 @@ async function liveRows({ sessionsDir, startReader, uidReader }, accept) {
 // is ours and not writable by others, and its pid still has the start time the row records), so a
 // stale row whose pid was reused never answers yes. Errors reading the directory are "unknown".
 export async function sessionLiveness(sessionId, options = {}) {
+  return (await sessionPresence(sessionId, options)).state;
+}
+// The same answer, plus the row this session would have been read from when one is there and was
+// refused as a file (`liveRows`). `state` is unchanged by it: a refused row is never "running".
+export async function sessionPresence(sessionId, options = {}) {
   try {
-    const rows = await liveRows(readerOptions(options), (row) => typeof row.sessionId === "string" && row.sessionId.toLowerCase() === String(sessionId).toLowerCase());
-    return rows.length > 0 ? "running" : "not_running";
-  } catch { return "unknown"; }
+    const rejected = wanting(sessionId);
+    const rows = await liveRows(readerOptions(options), (row) => typeof row.sessionId === "string" && row.sessionId.toLowerCase() === String(sessionId).toLowerCase(), rejected);
+    if (rows.length > 0) return { state: "running", rejectedRow: null };
+    return { state: "not_running", rejectedRow: rejected.rows[0] ?? null };
+  } catch { return { state: "unknown", rejectedRow: null }; }
 }
 
 export const SELF_ROW_NAME = "universal-peer-mcp";
